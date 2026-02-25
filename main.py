@@ -78,6 +78,77 @@ class ZoteroRAGApplication:
             logger.error(f"Failed to initialize: {e}")
             return False
 
+    def start_background_embedding(self):
+        """Start background embedding for pending documents.
+        
+        This runs in a separate thread to avoid blocking the main server.
+        """
+        if not self.embedding_manager or not self.server:
+            logger.warning("Cannot start embedding - services not initialized")
+            return
+            
+        # Get Zotero client from server
+        zotero_client = self.server.zotero_client
+        
+        def run_embedding():
+            try:
+                logger.info("[AutoEmbed] Checking for pending documents...")
+                
+                # Get all docs with PDFs
+                all_docs_with_pdfs = list(zotero_client.get_documents_with_pdfs())
+                
+                if not all_docs_with_pdfs:
+                    logger.info("[AutoEmbed] No documents with PDFs found")
+                    return
+
+                # Get currently embedded docs
+                embedded = self.embedding_manager.vector_store.get_embedded_documents()
+
+                # Filter to only new/updated documents
+                pending = [
+                    doc for doc in all_docs_with_pdfs
+                    if doc.zotero_key not in embedded or embedded[doc.zotero_key] == 0
+                ]
+
+                if not pending:
+                    logger.info(f"[AutoEmbed] All {len(all_docs_with_pdfs)} documents already embedded")
+                    return
+
+                # Start embedding job with progress tracking
+                self.embedding_manager.start_embedding_job(len(pending))
+                
+                # Submit all pending documents for background embedding
+                futures = []
+                for i, doc in enumerate(pending):
+                    def make_callback(doc_key: str, index: int):
+                        def cb(status):
+                            # Update global progress after each document completes
+                            status.processed_documents = index + 1
+                            self.embedding_manager._update_progress(status)
+                            
+                            current_status = self.embedding_manager.get_embedding_status()
+                            logger.info(f"[AutoEmbed] Progress: {current_status}")
+                        return cb
+
+                    try:
+                        future = self.embedding_manager.embed_document_async_with_client(
+                            doc,
+                            zotero_client,
+                            callback=make_callback(doc.zotero_key, i)
+                        )
+                        futures.append(future)
+                    except Exception as e:
+                        logger.error(f"[AutoEmbed] Failed to submit {doc.zotero_key}: {e}")
+
+                logger.info(f"[AutoEmbed] Started embedding {len(pending)} documents in background")
+                
+            except Exception as e:
+                logger.error(f"[AutoEmbed] Error during auto-embedding: {e}")
+        
+        # Run in a separate thread to not block the MCP server
+        embed_thread = threading.Thread(target=run_embedding, daemon=True)
+        embed_thread.start()
+
     def run_mcp_server(self):
         """Run the MCP server (blocking)."""
         # Initialize if not already done
@@ -99,6 +170,9 @@ class ZoteroRAGApplication:
 
         # Run the MCP server (this is blocking)
         logger.info(f"MCP server starting with stdio transport...")
+        
+        # Start background embedding automatically after initialization
+        self.start_background_embedding()
         
         try:
             # Use mcp.run() directly - it handles its own event loop

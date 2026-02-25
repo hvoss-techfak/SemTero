@@ -87,7 +87,18 @@ class SearchResult:
 class EmbeddingStatus:
     """Represents the current embedding status."""
     total_documents: int = 0
+    processed_documents: int = 0
     embedded_sections: int = 0
     embedded_sentences: int = 0
     pending_sections: int = 0
     is_running: bool = False
+    
+    @property
+    def progress_percentage(self) -> float:
+        """Calculate progress percentage (0-100)."""
+        if self.total_documents == 0:
+            return 0.0
+        return (self.processed_documents / self.total_documents) * 100
+    
+    def __str__(self) -> str:
+        return f"Progress: {self.processed_documents}/{self.total_documents} ({self.progress_percentage:.1f}%) - Sections: {self.embedded_sections}, Sentences: {self.embedded_sentences}"

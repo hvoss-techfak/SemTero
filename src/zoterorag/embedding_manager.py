@@ -4,6 +4,7 @@ import argparse
 import logging
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
@@ -32,6 +33,47 @@ class EmbeddingManager:
         self._executor: Optional[ThreadPoolExecutor] = None
         # Optional ZoteroClient for on-demand PDF fetching (temp file processing)
         self.zotero_client = zotero_client
+        
+        # Global progress tracking for background embedding jobs
+        self._embedding_progress: EmbeddingStatus = EmbeddingStatus()
+        self._progress_lock = threading.Lock()
+
+    def get_embedding_status(self) -> EmbeddingStatus:
+        """Get the current embedding status with thread-safe access."""
+        with self._progress_lock:
+            return EmbeddingStatus(
+                total_documents=self._embedding_progress.total_documents,
+                processed_documents=self._embedding_progress.processed_documents,
+                embedded_sections=self._embedding_progress.embedded_sections,
+                embedded_sentences=self._embedding_progress.embedded_sentences,
+                pending_sections=self._embedding_progress.pending_sections,
+                is_running=self._embedding_progress.is_running
+            )
+
+    def _update_progress(self, status: EmbeddingStatus):
+        """Thread-safe update of embedding progress."""
+        with self._progress_lock:
+            if status.total_documents > 0:
+                self._embedding_progress.total_documents = status.total_documents
+            if status.processed_documents > 0:
+                self._embedding_progress.processed_documents = status.processed_documents
+            self._embedding_progress.embedded_sections += status.embedded_sections
+            self._embedding_progress.embedded_sentences += status.embedded_sentences
+            self._embedding_progress.is_running = status.is_running
+
+    def start_embedding_job(self, total_documents: int):
+        """Start a new embedding job and initialize progress tracking.
+        
+        Args:
+            total_documents: Total number of documents to embed in this job
+        """
+        with self._progress_lock:
+            self._embedding_progress = EmbeddingStatus(
+                total_documents=total_documents,
+                processed_documents=0,
+                is_running=True
+            )
+        logger.info(f"[EmbeddingManager] Started embedding job for {total_documents} documents")
 
     @property
     def executor(self) -> ThreadPoolExecutor:
