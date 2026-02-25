@@ -49,16 +49,23 @@ class MCPZoteroServer:
 
     def _get_metadata_for_key(self, item_key: str) -> dict:
         """Get cached or fresh metadata for an item."""
+        print(f"[DEBUG] _get_metadata_for_key called with key: {item_key}")
+        
         if item_key in self._metadata_cache:
+            print(f"[DEBUG] Found metadata in cache for key: {item_key}")
             return self._metadata_cache[item_key]
         
         # Try to get from Zotero
+        print(f"[DEBUG] Calling zotero_client.get_item_metadata({item_key})")
         metadata = self.zotero_client.get_item_metadata(item_key)
+        print(f"[DEBUG] Got metadata result: {metadata}")
+        
         if metadata:
             self._metadata_cache[item_key] = metadata
             return metadata
         
         # Return empty metadata structure
+        print(f"[DEBUG] No metadata found, returning empty structure for key: {item_key}")
         return {
             "bibtex": "",
             "file_path": "",
@@ -81,6 +88,8 @@ class MCPZoteroServer:
         
         Returns enriched results including BibTeX and file metadata.
         """
+        print(f"[DEBUG] search_documents called with query: {query}")
+        
         results = self.search_engine.search(
             query=query,
             document_key=document_key,
@@ -88,41 +97,47 @@ class MCPZoteroServer:
             top_sentences_per_section=top_sentences_per_section
         )
         
-        # Enrich results with metadata from Zotero or fallback to vector store titles
-        enriched_results = []
-        seen_keys = set()
+        print(f"[DEBUG] Got {len(results)} search results")
+        
+        # First pass: collect all unique keys and fetch metadata for each once
+        # This ensures we call Zotero API at most once per unique document
+        key_to_metadata: dict[str, dict] = {}
         
         for r in results:
-            result_dict = r.to_dict()
-            
-            # Get document-level metadata (only once per document)
             zotero_key = r.zotero_key
+            print(f"[DEBUG] Processing result with zotero_key: {zotero_key}")
             
-            if not zotero_key and result_dict.get("section_title"):
-                # Try to extract document key from section - fallback to using
-                # the title from vector store as a fallback for document_title
-                pass
-            
-            if zotero_key and zotero_key not in seen_keys:
-                seen_keys.add(zotero_key)
-                
-                # First try Zotero API metadata
+            if zotero_key and zotero_key not in key_to_metadata:
+                # Fetch Zotero metadata (only once per unique document)
                 meta = self._get_metadata_for_key(zotero_key)
                 
-                # If no Zotero data, fall back to vector store title
+                # If no Zotero title, fall back to vector store title
                 if not meta.get("title"):
                     vs_title = self.search_engine.vector_store.get_document_title(zotero_key)
                     if vs_title:
                         meta["title"] = vs_title
                 
-                # Update the result with enriched data
+                key_to_metadata[zotero_key] = meta
+        
+        # Second pass: apply metadata to ALL results (not just the first one per key)
+        enriched_results = []
+        
+        for r in results:
+            result_dict = r.to_dict()
+            
+            zotero_key = r.zotero_key
+            
+            if zotero_key and zotero_key in key_to_metadata:
+                meta = key_to_metadata[zotero_key]
+                
+                # Apply all enriched data to this result
                 result_dict["bibtex"] = meta.get("bibtex", "")
                 result_dict["file_path"] = meta.get("file_path", "")
                 result_dict["authors"] = meta.get("authors", [])
                 result_dict["date"] = meta.get("date", "")
                 result_dict["item_type"] = meta.get("item_type", "")
                 
-                # Also update document_title if empty - prefer Zotero title, fallback to vector store
+                # Set document_title - prefer Zotero title, fallback to vector store
                 doc_title = meta.get("title", "")
                 if not doc_title:
                     vs_title = self.search_engine.vector_store.get_document_title(zotero_key)
@@ -130,9 +145,8 @@ class MCPZoteroServer:
                         doc_title = vs_title
                 result_dict["document_title"] = doc_title
             
-            # If we still don't have a document title, try to get it from section info
+            # If we still don't have a document title, use section info as fallback
             if not result_dict.get("document_title") and result_dict.get("section_title"):
-                # Use the section title's prefix as a fallback identifier
                 result_dict["document_title"] = f"Document containing: {result_dict['section_title'][:50]}"
             
             enriched_results.append(result_dict)

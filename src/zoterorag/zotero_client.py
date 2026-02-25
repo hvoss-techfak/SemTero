@@ -994,37 +994,117 @@ class ZoteroClient:
     def get_item_metadata(self, item_key: str) -> dict | None:
         """Get full metadata for an item including BibTeX and file info.
         
+        This method traverses the parent chain to find the actual document 
+        metadata (authors, date, etc.) in case the requested item is a PDF
+        attachment or other child item.
+        
         Args:
             item_key: The Zotero item key
             
         Returns:
             Dictionary with bibtex, file_path, title, authors, date, item_type
         """
-        try:
-            url = f"{self.api_url}/api/users/0/items/{item_key}"
-            response = self.session.get(url)
-            if response.status_code != 200:
+        print(f"[DEBUG zotero_client] get_item_metadata called with item_key: {item_key}")
+        
+        # Track visited items to prevent infinite loops
+        visited_keys = set()
+        current_key = item_key
+        max_depth = 10  # Safety limit for parent chain traversal
+        
+        while len(visited_keys) < max_depth:
+            if current_key in visited_keys:
+                print(f"[DEBUG zotero_client] Already visited {current_key}, stopping to avoid loop")
+                break
+            
+            visited_keys.add(current_key)
+            
+            try:
+                url = f"{self.api_url}/api/users/0/items/{current_key}"
+                print(f"[DEBUG zotero_client] Requesting URL: {url}")
+                
+                response = self.session.get(url)
+                print(f"[DEBUG zotero_client] Response status code: {response.status_code}")
+                
+                if response.status_code != 200:
+                    print(f"[DEBUG zotero_client] Non-200 status, returning None. Response text: {response.text[:500] if response.text else 'empty'}")
+                    return None
+                
+                item = response.json()
+                data = item.get("data", {})
+                print(f"[DEBUG zotero_client] Item type: {data.get('itemType', 'unknown')}, has parentItem: {'parentItem' in data}")
+                
+                # Check if this item has meaningful metadata (authors or date)
+                authors = [a.get("firstName", "") + " " + a.get("lastName", "").strip() 
+                           for a in data.get("creators", [])]
+                date = data.get("date", "")
+                title = data.get("title", "")
+                
+                item_type = data.get("itemType", "")
+                has_metadata = bool(authors or date or title)
+                is_attachment = (item_type == "attachment")
+                print(f"[DEBUG zotero_client] Current item has metadata: authors={len(authors)}, date='{date}', title='{title[:50]}...', is_attachment={is_attachment}")
+                
+                # If this item has full metadata and is NOT an attachment, use it
+                # For attachments (PDF files), always traverse to parent as they don't have complete bibliographic data
+                if has_metadata and not is_attachment:
+                    print(f"[DEBUG zotero_client] Found item with metadata at key {current_key}")
+                    
+                    # Get file path - use original requested key for PDF
+                    file_path = ""
+                    pdf_key = self._find_pdf_key(data)
+                    if not pdf_key:
+                        pdf_key = item_key  # Use the originally requested key
+                    print(f"[DEBUG zotero_client] Using PDF key: {pdf_key}")
+                    
+                    if pdf_key:
+                        file_path = f"{self.api_url}/api/users/0/items/{pdf_key}/file"
+                    
+                    return {
+                        "bibtex": self.item_to_bibtex(item),
+                        "file_path": file_path,
+                        "title": title,
+                        "authors": authors,
+                        "date": date,
+                        "item_type": data.get("itemType", ""),
+                    }
+                
+                # No metadata found, check if there's a parent to traverse
+                parent_key = data.get("parentItem")
+                print(f"[DEBUG zotero_client] No metadata, checking for parent: {parent_key}")
+                
+                if not parent_key:
+                    # No parent and no metadata - return what we have
+                    print(f"[DEBUG zotero_client] No parent item and no metadata, returning basic info")
+                    
+                    file_path = ""
+                    pdf_key = self._find_pdf_key(data)
+                    if pdf_key:
+                        file_path = f"{self.api_url}/api/users/0/items/{pdf_key}/file"
+                    
+                    return {
+                        "bibtex": self.item_to_bibtex(item),
+                        "file_path": file_path,
+                        "title": title,
+                        "authors": authors,
+                        "date": date,
+                        "item_type": data.get("itemType", ""),
+                    }
+                
+                # Continue to parent item
+                print(f"[DEBUG zotero_client] Traversing to parent: {parent_key}")
+                current_key = parent_key
+                
+            except requests.RequestException as e:
+                print(f"[DEBUG zotero_client] RequestException: {e}")
+                import traceback
+                traceback.print_exc()
                 return None
-            
-            item = response.json()
-            data = item.get("data", {})
-            
-            # Get file path
-            file_path = ""
-            pdf_key = self._find_pdf_key(data)
-            if pdf_key:
-                file_path = f"{self.api_url}/api/users/0/items/{pdf_key}/file"
-            
-            return {
-                "bibtex": self.item_to_bibtex(item),
-                "file_path": file_path,
-                "title": data.get("title", ""),
-                "authors": [
-                    f"{a.get('firstName', '')} {a.get('lastName', '')}".strip()
-                    for a in data.get("creators", [])
-                ],
-                "date": data.get("date", ""),
-                "item_type": data.get("itemType", ""),
-            }
-        except requests.RequestException:
-            return None
+            except Exception as e:
+                print(f"[DEBUG zotero_client] Unexpected exception: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+        
+        # Exhausted depth limit
+        print(f"[DEBUG zotero_client] Reached max depth {max_depth} without finding metadata")
+        return None
