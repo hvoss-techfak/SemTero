@@ -766,6 +766,114 @@ class ZoteroClient:
             group_id=group_id,  # Which library it came from
         )
 
+    def _get_item_url(self, item_key: str, group_id: int | None = None) -> str:
+        """Build an item URL for user or group library."""
+        if group_id is None:
+            return f"{self.api_url}/api/users/0/items/{item_key}"
+        return f"{self.api_url}/api/groups/{group_id}/items/{item_key}"
+
+    def _get_file_url(self, item_key: str, group_id: int | None = None) -> str:
+        """Build a file URL for user or group library."""
+        if group_id is None:
+            return f"{self.api_url}/api/users/0/items/{item_key}/file"
+        return f"{self.api_url}/api/groups/{group_id}/items/{item_key}/file"
+
+    def get_item_any_library(self, item_key: str, group_id: int | None = None) -> tuple[dict | None, int | None]:
+        """Fetch an item, optionally trying user and then all known groups.
+
+        Returns (item_json, resolved_group_id). resolved_group_id None means user library.
+        """
+        # Try the hinted library first
+        try_order: list[int | None]
+        if group_id is None:
+            try_order = [None] + self.get_group_ids()
+        else:
+            try_order = [group_id]
+
+        for gid in try_order:
+            try:
+                url = self._get_item_url(item_key, gid)
+                resp = self.session.get(url)
+                if resp.status_code == 200:
+                    return resp.json(), gid
+            except requests.RequestException:
+                continue
+
+        return None, None
+
+    def resolve_parent_item_key(
+        self,
+        item_key: str,
+        group_id: int | None = None,
+        max_depth: int = 10,
+    ) -> tuple[str, int | None]:
+        """Resolve an attachment/note/etc. up to the bibliographic parent item.
+
+        Returns (resolved_item_key, resolved_group_id).
+        """
+        visited: set[tuple[int | None, str]] = set()
+        current_key = item_key
+        current_gid = group_id
+
+        for _ in range(max_depth):
+            state = (current_gid, current_key)
+            if state in visited:
+                break
+            visited.add(state)
+
+            item, resolved_gid = self.get_item_any_library(current_key, current_gid)
+            if not item:
+                # Can't fetch current item; stop and return what we have
+                return current_key, current_gid
+
+            current_gid = resolved_gid
+            data = item.get("data", {})
+            parent_key = data.get("parentItem")
+
+            # If there's no parent, current_key is the best we can do
+            if not parent_key:
+                return current_key, current_gid
+
+            current_key = parent_key
+
+        return current_key, current_gid
+
+    def get_item_metadata(self, item_key: str, group_id: int | None = None) -> dict | None:
+        """Get full metadata for an item including BibTeX and file info.
+
+        Traverses the parent chain to find bibliographic metadata. Works for both
+        user and group libraries.
+        """
+        # First, resolve to the bibliographic parent (if any)
+        resolved_key, resolved_gid = self.resolve_parent_item_key(item_key, group_id=group_id)
+
+        # Fetch the resolved item
+        item, resolved_gid = self.get_item_any_library(resolved_key, resolved_gid)
+        if not item:
+            return None
+
+        data = item.get("data", {})
+        authors = [
+            (a.get("firstName", "") + " " + a.get("lastName", "")).strip()
+            for a in data.get("creators", [])
+            if (a.get("firstName") or a.get("lastName"))
+        ]
+        date = data.get("date", "")
+        title = data.get("title", "")
+        item_type = data.get("itemType", "")
+
+        # File path: keep pointing at the originally-known attachment key
+        file_path = self._get_file_url(item_key, resolved_gid)
+
+        return {
+            "bibtex": self.item_to_bibtex(item),
+            "file_path": file_path,
+            "title": title,
+            "authors": authors,
+            "date": date,
+            "item_type": item_type,
+        }
+
     def get_total_items_count(self) -> int:
         """Get the total number of items in the user's library.
         
@@ -991,102 +1099,3 @@ class ZoteroClient:
         }
         return type_map.get(item_type, "misc")
 
-    def get_item_metadata(self, item_key: str) -> dict | None:
-        """Get full metadata for an item including BibTeX and file info.
-        
-        This method traverses the parent chain to find the actual document 
-        metadata (authors, date, etc.) in case the requested item is a PDF
-        attachment or other child item.
-        
-        Args:
-            item_key: The Zotero item key
-            
-        Returns:
-            Dictionary with bibtex, file_path, title, authors, date, item_type
-        """
-        # Track visited items to prevent infinite loops
-        visited_keys = set()
-        current_key = item_key
-        max_depth = 10  # Safety limit for parent chain traversal
-        
-        while len(visited_keys) < max_depth:
-            if current_key in visited_keys:
-                logger.debug(f"Already visited {current_key}, stopping to avoid loop")
-                break
-            
-            visited_keys.add(current_key)
-            
-            try:
-                url = f"{self.api_url}/api/users/0/items/{current_key}"
-                
-                response = self.session.get(url)
-                
-                if response.status_code != 200:
-                    return None
-                
-                item = response.json()
-                data = item.get("data", {})
-                
-                # Check if this item has meaningful metadata (authors or date)
-                authors = [a.get("firstName", "") + " " + a.get("lastName", "").strip() 
-                           for a in data.get("creators", [])]
-                date = data.get("date", "")
-                title = data.get("title", "")
-                
-                item_type = data.get("itemType", "")
-                has_metadata = bool(authors or date or title)
-                is_attachment = (item_type == "attachment")
-                
-                # If this item has full metadata and is NOT an attachment, use it
-                # For attachments (PDF files), always traverse to parent as they don't have complete bibliographic data
-                if has_metadata and not is_attachment:
-                    # Get file path - use original requested key for PDF
-                    file_path = ""
-                    pdf_key = self._find_pdf_key(data)
-                    if not pdf_key:
-                        pdf_key = item_key  # Use the originally requested key
-                    
-                    if pdf_key:
-                        file_path = f"{self.api_url}/api/users/0/items/{pdf_key}/file"
-                    
-                    return {
-                        "bibtex": self.item_to_bibtex(item),
-                        "file_path": file_path,
-                        "title": title,
-                        "authors": authors,
-                        "date": date,
-                        "item_type": data.get("itemType", ""),
-                    }
-                
-                # No metadata found, check if there's a parent to traverse
-                parent_key = data.get("parentItem")
-                
-                if not parent_key:
-                    # No parent and no metadata - return what we have
-                    file_path = ""
-                    pdf_key = self._find_pdf_key(data)
-                    if pdf_key:
-                        file_path = f"{self.api_url}/api/users/0/items/{pdf_key}/file"
-                    
-                    return {
-                        "bibtex": self.item_to_bibtex(item),
-                        "file_path": file_path,
-                        "title": title,
-                        "authors": authors,
-                        "date": date,
-                        "item_type": data.get("itemType", ""),
-                    }
-                
-                # Continue to parent item
-                current_key = parent_key
-                
-            except requests.RequestException as e:
-                logger.warning(f"Request error while fetching metadata: {e}")
-                return None
-            except Exception as e:
-                logger.warning(f"Unexpected error while fetching metadata: {e}")
-                return None
-        
-        # Exhausted depth limit
-        logger.debug(f"Reached max depth {max_depth} without finding metadata")
-        return None

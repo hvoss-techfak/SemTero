@@ -11,7 +11,7 @@ dependencies = [
     "numpy>=1.24",
     "tenacity>=8.0",
     "pymupdf-layout",
-    "mcp>=1.26.0",
+    "fastmcp",
 ]
 
 [project.optional-dependencies]
