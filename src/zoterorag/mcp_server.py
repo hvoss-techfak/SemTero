@@ -1,14 +1,14 @@
 """MCP server for ZoteroRAG."""
 
-import json
 import logging
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
+
+from fastmcp import FastMCP
 
 from .config import Config
-from .zotero_client import ZoteroClient
 from .embedding_manager import EmbeddingManager
 from .search_engine import SearchEngine
+from .zotero_client import ZoteroClient
 
 
 logger = logging.getLogger(__name__)
@@ -314,55 +314,95 @@ class MCPZoteroServer:
         self.embedding_manager.shutdown()
 
 
-# --- MCP Protocol Helpers ---
+# --- FastMCP wiring ---
 
-def create_mcp_response(tool_name: str, result: Any) -> dict:
-    """Create a standardized MCP response."""
-    return {
-        "jsonrpc": "2.0",
-        "id": None,
-        "result": {
-            "tool": tool_name,
-            "output": result
-        }
-    }
+mcp = FastMCP("ZoteroRAG")
+
+# Global server instance, set by main.py during startup.
+_SERVER: MCPZoteroServer | None = None
 
 
-def create_mcp_error(code: int, message: str) -> dict:
-    """Create a standardized MCP error response."""
-    return {
-        "jsonrpc": "2.0",
-        "id": None,
-        "error": {
-            "code": code,
-            "message": message
-        }
-    }
+def set_server_instance(server: MCPZoteroServer) -> None:
+    """Register the live server instance used by FastMCP tool wrappers."""
+    global _SERVER
+    _SERVER = server
 
 
-# --- Main entry point ---
+def get_server() -> MCPZoteroServer:
+    """Get the registered server instance or raise a helpful error."""
+    if _SERVER is None:
+        raise RuntimeError(
+            "MCPZoteroServer instance not registered. "
+            "Call set_server_instance(MCPZoteroServer(...)) before starting FastMCP."
+        )
+    return _SERVER
 
-def main():
-    """Run the MCP server (standalone)."""
+
+@mcp.tool
+async def search_documents(
+    query: str,
+    document_key: Optional[str] = None,
+    top_sections: int = 5,
+    top_sentences_per_section: int = 3,
+) -> list[dict]:
+    """Search across embedded documents using two-stage RAG."""
+    return await get_server().search_documents(
+        query=query,
+        document_key=document_key,
+        top_sections=top_sections,
+        top_sentences_per_section=top_sentences_per_section,
+    )
+
+
+@mcp.tool
+async def get_library_items(limit: int = 25) -> list[dict]:
+    """Get items from Zotero library."""
+    return await get_server().get_library_items(limit=limit)
+
+
+@mcp.tool
+async def get_documents_with_pdfs() -> list[dict]:
+    """Get all documents that have PDFs."""
+    return await get_server().get_documents_with_pdfs()
+
+
+@mcp.tool
+async def sync_and_embed(embed_sentences: bool = False, document_key: Optional[str] = None) -> dict:
+    """Sync from Zotero and optionally embed new documents."""
+    return await get_server().sync_and_embed(embed_sentences=embed_sentences, document_key=document_key)
+
+
+@mcp.tool
+async def get_embedding_status() -> dict:
+    """Get current embedding statistics."""
+    return await get_server().get_embedding_status()
+
+
+@mcp.tool
+async def delete_document(document_key: str) -> dict:
+    """Delete all embeddings for a document."""
+    return await get_server().delete_document(document_key)
+
+
+@mcp.tool
+async def reembed_document(document_key: str) -> dict:
+    """Re-embed a specific document."""
+    return await get_server().reembed_document(document_key)
+
+
+def main() -> None:
+    """Run the FastMCP server (stdio)."""
     logging.basicConfig(level=logging.INFO)
-    
+
     config = Config()
     server = MCPZoteroServer(config)
+    set_server_instance(server)
 
-    logger.info("MCP server starting on port 23120...")
-    
-    try:
-        import asyncio
-        # Start auto-embedding in background (non-blocking)
-        asyncio.get_event_loop().run_until_complete(server.start_auto_embedding())
-        
-        # Keep running
-        import time
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        server.shutdown()
+    logger.info("FastMCP server starting with stdio transport...")
+
+    # Note: background embedding is started by main.py in the full app.
+    # Keeping this entrypoint minimal for standalone use.
+    mcp.run()
 
 
 if __name__ == "__main__":

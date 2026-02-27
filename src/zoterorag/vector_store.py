@@ -133,7 +133,9 @@ class VectorStore:
         self,
         sections: List[Section],
         embeddings: List[List[float]],
-        document_key: str
+        document_key: str,
+        zotero_key: str,
+        parent_item_key: str,
     ):
         """Add section embeddings to the store."""
         if not sections or not embeddings:
@@ -148,6 +150,8 @@ class VectorStore:
                 "level": str(s.level),
                 "start_page": s.start_page,
                 "end_page": s.end_page,
+                "zotero_key": zotero_key,
+                "parent_item_key": parent_item_key,
             }
             for s in sections
         ]
