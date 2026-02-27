@@ -505,19 +505,9 @@ class SearchEngine:
                 windows_to_add.extend(created)
 
             if windows_to_add:
-                # Persist for future calls
                 embeddings_to_add = self.embed_batch([w.text for w in windows_to_add])
-                # Document key is stored in metadata for filtering; use the linked doc key.
-                # Windows may span multiple documents, so group by doc key for correct metadata.
-                by_doc: dict[str, list[tuple[SentenceWindow, List[float]]]] = {}
-                for w, emb in zip(windows_to_add, embeddings_to_add):
-                    doc_key = (w.section_id.split("_")[0] if False else None)  # no-op, keep lint happy
-                    by_doc.setdefault("", []).append((w, emb))
 
-                # We don't have doc_key on SentenceWindow, so we add all with a best-effort
-                # doc key lookup from the section itself.
                 for section_id, doc_key, _score in section_results:
-                    # collect those windows belonging to this section
                     section_windows: list[SentenceWindow] = [w for w in windows_to_add if w.section_id == section_id]
                     if not section_windows:
                         continue
@@ -526,10 +516,15 @@ class SearchEngine:
                         for i, w in enumerate(windows_to_add)
                         if w.section_id == section_id
                     ]
+
+                    # Pull Zotero keys stored for this document (if available)
+                    key_meta = self.vector_store.get_document_zotero_keys(doc_key)
                     self.vector_store.add_sentence_windows(
                         section_windows,
                         section_embeddings,
                         document_key=doc_key or "",
+                        zotero_key=key_meta.get("zotero_key") or None,
+                        parent_item_key=key_meta.get("parent_item_key") or None,
                     )
 
         # --- Stage 3: search sentence windows within selected documents ---

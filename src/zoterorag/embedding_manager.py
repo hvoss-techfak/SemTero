@@ -433,8 +433,14 @@ class EmbeddingManager:
 
             # Embed sections
             section_embeddings = self.embed_batch([s.text for s in sections])
-            self.vector_store.add_sections(sections, section_embeddings, document.zotero_key)
-            
+            self.vector_store.add_sections(
+                sections,
+                section_embeddings,
+                document_key=document.zotero_key,
+                zotero_key=document.zotero_key,
+                parent_item_key=document.parent_item_key,
+            )
+
             logger.debug(f"[Embedding] Embedded {len(sections)} sections")
 
             # Update metadata
@@ -455,7 +461,11 @@ class EmbeddingManager:
 
                 sent_embeddings = self.embed_batch([w.text for w in sentence_windows])
                 self.vector_store.add_sentence_windows(
-                    sentence_windows, sent_embeddings, document.zotero_key
+                    sentence_windows,
+                    sent_embeddings,
+                    document_key=document.zotero_key,
+                    zotero_key=document.zotero_key,
+                    parent_item_key=document.parent_item_key,
                 )
 
             # ...existing code...
@@ -506,8 +516,14 @@ class EmbeddingManager:
 
             # Embed sections
             section_embeddings = self.embed_batch([s.text for s in sections])
-            self.vector_store.add_sections(sections, section_embeddings, document.zotero_key)
-            
+            self.vector_store.add_sections(
+                sections,
+                section_embeddings,
+                document_key=document.zotero_key,
+                zotero_key=document.zotero_key,
+                parent_item_key=document.parent_item_key,
+            )
+
             logger.debug(f"[Embedding] Embedded {len(sections)} sections")
 
             # Update metadata
@@ -528,7 +544,11 @@ class EmbeddingManager:
 
                 sent_embeddings = self.embed_batch([w.text for w in sentence_windows])
                 self.vector_store.add_sentence_windows(
-                    sentence_windows, sent_embeddings, document.zotero_key
+                    sentence_windows,
+                    sent_embeddings,
+                    document_key=document.zotero_key,
+                    zotero_key=document.zotero_key,
+                    parent_item_key=document.parent_item_key,
                 )
 
             # ...existing code...
@@ -613,8 +633,14 @@ class EmbeddingManager:
                     
                 # Embed sections
                 section_embeddings = self.embed_batch([s.text for s in sections])
-                self.vector_store.add_sections(sections, section_embeddings, document.zotero_key)
-                
+                self.vector_store.add_sections(
+                    sections,
+                    section_embeddings,
+                    document_key=document.zotero_key,
+                    zotero_key=document.zotero_key,
+                    parent_item_key=document.parent_item_key,
+                )
+
                 logger.info(f"Embedded {len(sections)} sections from {document.title[:40]}...")
                 
                 # Update metadata
@@ -626,7 +652,11 @@ class EmbeddingManager:
                 if sentence_windows and self.config.AUTO_EMBED_SENTENCES:
                     sent_embeddings = self.embed_batch([w.text for w in sentence_windows])
                     self.vector_store.add_sentence_windows(
-                        sentence_windows, sent_embeddings, document.zotero_key
+                        sentence_windows,
+                        sent_embeddings,
+                        document_key=document.zotero_key,
+                        zotero_key=document.zotero_key,
+                        parent_item_key=document.parent_item_key,
                     )
                     logger.info(f"Embedded {len(sentence_windows)} sentence windows")
                 

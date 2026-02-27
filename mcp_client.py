@@ -98,6 +98,12 @@ class SentenceHit:
         )
 
 
+def _get_mapping(maybe: Any) -> dict:
+    if isinstance(maybe, dict):
+        return maybe
+    return {}
+
+
 async def _call_search_sentences(args) -> list[dict]:
     """Spawn the server as a stdio subprocess and call the MCP tool."""
 
@@ -154,10 +160,12 @@ async def _call_search_sentences(args) -> list[dict]:
 
             # Last resort: normalize whatever we got into plain Python data.
             normalized = _to_jsonable(result)
-            if isinstance(normalized, dict) and "structuredContent" in normalized:
-                maybe = normalized.get("structuredContent", {}).get("result")
-                if isinstance(maybe, list):
-                    return [r for r in maybe if isinstance(r, dict)]
+            if isinstance(normalized, dict):
+                sc = normalized.get("structuredContent")
+                if isinstance(sc, dict):
+                    maybe = sc.get("result")
+                    if isinstance(maybe, list):
+                        return [r for r in maybe if isinstance(r, dict)]
 
             return [{"error": "Unexpected MCP response shape", "raw": str(result)}]
 

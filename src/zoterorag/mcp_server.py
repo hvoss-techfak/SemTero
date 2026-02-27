@@ -84,13 +84,10 @@ class MCPZoteroServer:
     def _resolve_zotero_item_key(self, maybe_doc_key: str) -> str:
         """Resolve a vector-store document key to an actual Zotero item key.
 
-        In this project, embeddings are often stored under the PDF filename stem
-        (Path.stem) as the vector-store document_key. Zotero metadata, however,
-        is accessible only via the real Zotero item key.
-
-        Strategy:
-        - If the key exists in Zotero as an item, keep it.
-        - Otherwise, try to find an attachment item whose filename stem matches.
+        Priority order:
+        1) If Chroma metadata already stored zotero_key for this document_key, use it.
+        2) If maybe_doc_key exists in Zotero as an item key, keep it.
+        3) Fallback: scan attachment filenames and match by stem.
         """
         if not maybe_doc_key:
             return maybe_doc_key
@@ -99,7 +96,17 @@ class MCPZoteroServer:
         if cached:
             return cached
 
-        # Fast path: does this key exist as a Zotero item key?
+        # 1) Prefer keys stored in the vector store
+        try:
+            stored = self.search_engine.vector_store.get_document_zotero_keys(maybe_doc_key)
+            zkey = (stored or {}).get("zotero_key")
+            if zkey:
+                self._pdf_stem_to_item_key_cache[maybe_doc_key] = zkey
+                return zkey
+        except Exception:
+            pass
+
+        # 2) Fast path: does this key exist as a Zotero item key?
         try:
             item = self.zotero_client.get_item(maybe_doc_key)
             if item and item.get("key"):
@@ -108,7 +115,7 @@ class MCPZoteroServer:
         except Exception:
             pass
 
-        # Slow path: scan for a matching attachment by filename stem.
+        # 3) Slow path: scan for a matching attachment by filename stem.
         try:
             url = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items"
             params = {"itemType": "attachment", "limit": 100}
@@ -135,13 +142,11 @@ class MCPZoteroServer:
                             self._pdf_stem_to_item_key_cache[maybe_doc_key] = key
                             return key
 
-                # Pagination
                 params["start"] = int(params.get("start", 0)) + int(params.get("limit", 100))
 
         except Exception:
             pass
 
-        # Give up
         self._pdf_stem_to_item_key_cache[maybe_doc_key] = maybe_doc_key
         return maybe_doc_key
 
@@ -164,38 +169,45 @@ class MCPZoteroServer:
             }
 
         # Resolve vector-store doc keys (PDF stems) to real Zotero item keys.
-        item_key = self._resolve_zotero_item_key(item_key)
+        resolved_item_key = self._resolve_zotero_item_key(item_key)
 
-        # Prefer caching by resolved bibliographic key.
-        resolved_key = self._resolve_parent_key(item_key)
+        # If the vector store already knows the parent, prefer it for bibliographic fields.
+        try:
+            stored = self.search_engine.vector_store.get_document_zotero_keys(item_key)
+        except Exception:
+            stored = {"zotero_key": "", "parent_item_key": ""}
+
+        parent_hint = (stored or {}).get("parent_item_key") or ""
+        attachment_key = (stored or {}).get("zotero_key") or resolved_item_key
+
+        # Prefer caching by resolved bibliographic key (parent)
+        resolved_key = self._resolve_parent_key(parent_hint or resolved_item_key)
 
         if resolved_key in self._metadata_cache:
             meta = dict(self._metadata_cache[resolved_key])
-            # Ensure file_path points to the requested (likely attachment) key.
-            if not meta.get("file_path"):
-                meta["file_path"] = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{item_key}/file"
+            if not meta.get("file_path") and attachment_key:
+                meta["file_path"] = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{attachment_key}/file"
             return meta
 
-        # Try to get from Zotero (handles attachment->parent traversal internally)
-        metadata = self.zotero_client.get_item_metadata(item_key)
+        # Fetch bibliographic data from parent if we have it, else from resolved item
+        meta_source_key = parent_hint or resolved_item_key
+        metadata = self.zotero_client.get_item_metadata(meta_source_key)
 
         if metadata:
-            # If metadata came back without file_path, prefer attachment file URL.
-            if not metadata.get("file_path"):
-                metadata["file_path"] = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{item_key}/file"
+            if not metadata.get("file_path") and attachment_key:
+                metadata["file_path"] = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{attachment_key}/file"
 
             self._metadata_cache[resolved_key] = metadata
-            # Also allow direct lookup by original key.
-            self._metadata_cache[item_key] = metadata
+            self._metadata_cache[meta_source_key] = metadata
             return metadata
 
         return {
             "bibtex": "",
-            "file_path": "",
+            "file_path": f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{attachment_key}/file" if attachment_key else "",
             "title": "",
             "authors": [],
             "date": "",
-            "item_type": ""
+            "item_type": "",
         }
 
     def shutdown(self):
