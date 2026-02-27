@@ -408,7 +408,7 @@ class EmbeddingManager:
             pdf_bytes = zotero_client.get_pdf_bytes(doc_key)
         
         if pdf_bytes is None:
-            logger.error(f"Failed to fetch PDF for {doc_key} from Zotero")
+            #logger.error(f"Failed to fetch PDF for {doc_key} from Zotero, file was group file {document.group_id is not None}")
             if callback:
                 status = EmbeddingStatus(is_running=False)
                 callback(status)

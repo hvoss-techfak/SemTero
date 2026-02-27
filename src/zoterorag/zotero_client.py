@@ -653,16 +653,19 @@ class ZoteroClient:
                     return data
 
             if response.status_code == 204:  # No content
+                print("No Content")
                 return None
 
             response.raise_for_status()
 
             data = response.content
             if not data:
+                print("No Data")
                 return None
             return data
 
-        except requests.RequestException:
+        except requests.RequestException as e:
+            print(e)
             return None
 
     def download_pdf_for_doc(self, document: Document) -> bool:
