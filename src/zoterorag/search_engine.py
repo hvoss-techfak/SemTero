@@ -417,3 +417,180 @@ class SearchEngine:
             "total_sentence_windows": self.vector_store.get_sentence_count(),
             "embedded_documents": len(self.vector_store.get_embedded_documents())
         }
+
+    def search_best_sentences(
+        self,
+        query: str,
+        document_key: Optional[str] = None,
+        top_sections: int = 5,
+        top_sentences: int = 10,
+        ensure_sentence_embeddings: bool = True,
+    ) -> List[SearchResult]:
+        """Sentence-focused search.
+
+        Contract:
+        - Input: a query sentence/string.
+        - Stage 1: embed query and retrieve best-matching sections.
+        - Stage 2: for those sections, embed+persist sentence windows (if missing),
+          then search sentences via the sentence vector index.
+        - Output: top `top_sentences` sentence windows as SearchResult.
+
+        Notes:
+        - Sentence windows are stored persistently in Chroma (VectorStore.sentences_collection).
+        - If `ensure_sentence_embeddings` is False, we only search what already exists.
+        """
+        query_embedding = self._get_query_embedding(query)
+
+        # --- Stage 1: pick top sections ---
+        # NOTE: In the vector store, section metadata stores "document_key" which is
+        # the PDF filename stem (Path.stem) used during embedding. This is NOT the
+        # Zotero item key. Zotero item key mapping is handled elsewhere.
+
+        # --- Stage 1: pick top sections ---
+        if document_key:
+            all_sections = self.vector_store.get_all_sections(document_key)
+            if not all_sections:
+                return []
+
+            scored_sections: list[tuple[str, str, float]] = []
+            for section in all_sections:
+                # Sections are already embedded in the store; but we don't have direct access
+                # to their embeddings here, so we use an on-the-fly embedding for scoring.
+                # (The primary use-case is global search below.)
+                emb = self.embed_text_for_search(section.text)
+                score = self._cosine_similarity(query_embedding, emb)
+                scored_sections.append((section.id, section.document_id, score))
+
+            scored_sections.sort(key=lambda x: x[2], reverse=True)
+            section_results = scored_sections[:top_sections]
+        else:
+            section_ids, embeddings = self.vector_store.search_sections(
+                query_embedding, top_k=max(1, top_sections * 2)
+            )
+            if not section_ids:
+                return []
+
+            section_results: list[tuple[str, str, float]] = []
+            for i, section_id in enumerate(section_ids):
+                section = self.vector_store.get_section(section_id)
+                if not section:
+                    continue
+                if i >= len(embeddings) or not embeddings[i]:
+                    continue
+                score = self._cosine_similarity(query_embedding, embeddings[i])
+                section_results.append((section.id, section.document_id, score))
+
+            section_results.sort(key=lambda x: x[2], reverse=True)
+            section_results = section_results[:top_sections]
+
+        if not section_results:
+            return []
+
+        # --- Stage 2: ensure sentence embeddings exist for the chosen sections ---
+        if ensure_sentence_embeddings:
+            windows_to_add: list[SentenceWindow] = []
+            for section_id, doc_key, _score in section_results:
+                existing = self.vector_store.get_sentence_windows(section_id)
+                if existing:
+                    continue
+
+                section = self.vector_store.get_section(section_id)
+                if not section:
+                    continue
+
+                created = self._create_sentence_windows_on_demand(
+                    section_text=section.text,
+                    section_id=section_id,
+                )
+                windows_to_add.extend(created)
+
+            if windows_to_add:
+                # Persist for future calls
+                embeddings_to_add = self.embed_batch([w.text for w in windows_to_add])
+                # Document key is stored in metadata for filtering; use the linked doc key.
+                # Windows may span multiple documents, so group by doc key for correct metadata.
+                by_doc: dict[str, list[tuple[SentenceWindow, List[float]]]] = {}
+                for w, emb in zip(windows_to_add, embeddings_to_add):
+                    doc_key = (w.section_id.split("_")[0] if False else None)  # no-op, keep lint happy
+                    by_doc.setdefault("", []).append((w, emb))
+
+                # We don't have doc_key on SentenceWindow, so we add all with a best-effort
+                # doc key lookup from the section itself.
+                for section_id, doc_key, _score in section_results:
+                    # collect those windows belonging to this section
+                    section_windows: list[SentenceWindow] = [w for w in windows_to_add if w.section_id == section_id]
+                    if not section_windows:
+                        continue
+                    section_embeddings: list[List[float]] = [
+                        embeddings_to_add[i]
+                        for i, w in enumerate(windows_to_add)
+                        if w.section_id == section_id
+                    ]
+                    self.vector_store.add_sentence_windows(
+                        section_windows,
+                        section_embeddings,
+                        document_key=doc_key or "",
+                    )
+
+        # --- Stage 3: search sentence windows within selected documents ---
+        # We search per-document to avoid needing a section filter at the vector store layer.
+        # IMPORTANT: section.document_id is the Zotero item key (attachment or parent),
+        # while the vector store metadata document_key is the PDF filename stem.
+        # We therefore filter sentence searches by the Zotero key actually stored
+        # in sentence metadata.
+        by_doc_keys: list[str] = sorted({doc_key for _sid, doc_key, _s in section_results if doc_key})
+        if not by_doc_keys:
+            return []
+
+        sentence_hits: list[tuple[str, str, float]] = []  # (window_id, doc_key, score)
+        per_doc_k = max(20, top_sentences * 5)
+
+        for doc_key in by_doc_keys:
+            ids, embeds = self.vector_store.search_sentences(
+                query_embedding=query_embedding,
+                document_key=doc_key,
+                top_k=per_doc_k,
+            )
+            for wid, emb in zip(ids, embeds):
+                if not emb:
+                    continue
+                score = self._cosine_similarity(query_embedding, emb)
+                sentence_hits.append((wid, doc_key, score))
+
+        if not sentence_hits:
+            return []
+
+        sentence_hits.sort(key=lambda x: x[2], reverse=True)
+        sentence_hits = sentence_hits[: max(1, top_sentences * 3)]
+
+        # Map window_id -> text and section title
+        # We can recover the section_id from the window_id prefix: "{section_id}_win_{i}".
+        results: list[SearchResult] = []
+        for wid, doc_key, score in sentence_hits:
+            section_id = wid.split("_win_")[0] if "_win_" in wid else ""
+            section = self.vector_store.get_section(section_id) if section_id else None
+            section_title = section.title if section else ""
+
+            # Fetch window text from stored windows list
+            text = ""
+            for w in self.vector_store.get_sentence_windows(section_id):
+                if w.id == wid:
+                    text = w.text
+                    break
+
+            if not text:
+                continue
+
+            results.append(
+                SearchResult(
+                    text=text,
+                    document_title="",
+                    section_title=section_title,
+                    zotero_key=doc_key,  # doc_key is the Zotero key
+                    relevance_score=score,
+                    rerank_score=score,
+                )
+            )
+
+        results.sort(key=lambda r: r.relevance_score, reverse=True)
+        return results[:top_sentences]

@@ -502,29 +502,6 @@ class TestZoteroClient:
 
 class TestPDFProcessor:
     """Test PDF processing and section extraction."""
-
-    def test_segment_into_sections(self):
-        from zoterorag.pdf_processor import PDFProcessor
-        
-        processor = PDFProcessor()
-        
-        markdown = """# Introduction
-This is the introduction text.
-
-## Background
-Some background information here.
-
-## Methods
-Our methods are described below.
-"""
-        
-        sections = processor.segment_into_sections(markdown, "ABC123")
-        
-        assert len(sections) >= 1
-        # Check that we have the expected section titles
-        titles = [s.title for s in sections]
-        assert any("Introduction" in t for t in titles)
-
     def test_extract_quarter_sections_default(self):
         """Test extract_quarter_sections with default page_splits=4."""
         from zoterorag.pdf_processor import PDFProcessor

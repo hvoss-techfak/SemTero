@@ -33,6 +33,7 @@ from zoterorag.mcp_server import MCPZoteroServer, set_server_instance, mcp
 from zoterorag.search_engine import SearchEngine
 from zoterorag.vector_store import VectorStore
 from zoterorag.zotero_client import ZoteroClient
+from zoterorag.logging_setup import setup_logging
 
 
 logging.basicConfig(
@@ -40,6 +41,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress very chatty 3rd-party loggers (http clients, etc.)
+setup_logging(quiet_http=True)
 
 
 class ZoteroRAGApplication:
@@ -51,6 +55,12 @@ class ZoteroRAGApplication:
         self.embedding_manager: EmbeddingManager | None = None
         self._running = False
         self._daemon_thread: threading.Thread | None = None
+
+        # Rate-limit console progress output for background embedding
+        self._last_embed_progress_log_ts: float = 0.0
+        self._embed_progress_interval_sec: float = float(
+            os.getenv("EMBED_PROGRESS_INTERVAL_SEC", "2.0")
+        )
 
     def initialize(self) -> bool:
         """Initialize all services."""
@@ -117,37 +127,74 @@ class ZoteroRAGApplication:
                 # Start embedding job with progress tracking
                 self.embedding_manager.start_embedding_job(len(pending))
                 
+                # Emit initial progress line
+                self._emit_embed_progress(force=True)
+
                 # Submit all pending documents for background embedding
                 futures = []
                 for i, doc in enumerate(pending):
-                    def make_callback(doc_key: str, index: int):
+                    def make_callback(index: int):
                         def cb(status):
                             # Update global progress after each document completes
                             status.processed_documents = index + 1
                             self.embedding_manager._update_progress(status)
-                            
-                            current_status = self.embedding_manager.get_embedding_status()
-                            logger.info(f"[AutoEmbed] Progress: {current_status}")
+
+                            # Rate-limited progress output
+                            self._emit_embed_progress()
                         return cb
 
                     try:
                         future = self.embedding_manager.embed_document_async_with_client(
                             doc,
                             zotero_client,
-                            callback=make_callback(doc.zotero_key, i)
+                            callback=make_callback(i)
                         )
                         futures.append(future)
                     except Exception as e:
                         logger.error(f"[AutoEmbed] Failed to submit {doc.zotero_key}: {e}")
 
                 logger.info(f"[AutoEmbed] Started embedding {len(pending)} documents in background")
-                
+
+                # Wait for completion to print final summary line
+                for f in futures:
+                    try:
+                        f.result()
+                    except Exception:
+                        # individual failures are already logged elsewhere
+                        pass
+
+                self._emit_embed_progress(force=True)
+
             except Exception as e:
                 logger.error(f"[AutoEmbed] Error during auto-embedding: {e}")
         
         # Run in a separate thread to not block the MCP server
         embed_thread = threading.Thread(target=run_embedding, daemon=True)
         embed_thread.start()
+
+    def _emit_embed_progress(self, *, force: bool = False) -> None:
+        """Emit a single-line progress update for background embedding.
+
+        Rate limited to keep logs readable.
+        """
+        if not self.embedding_manager:
+            return
+
+        now = time.time()
+        if not force and (now - self._last_embed_progress_log_ts) < self._embed_progress_interval_sec:
+            return
+
+        self._last_embed_progress_log_ts = now
+        status = self.embedding_manager.get_embedding_status()
+        if status.total_documents > 0:
+            logger.info(
+                "[AutoEmbed] Progress %s/%s docs | +%s sections | +%s sentences | running=%s",
+                status.processed_documents,
+                status.total_documents,
+                status.embedded_sections,
+                status.embedded_sentences,
+                status.is_running,
+            )
 
     def run_mcp_server(self):
         """Run the MCP server (blocking)."""

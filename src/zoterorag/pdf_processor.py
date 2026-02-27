@@ -1,6 +1,9 @@
 """PDF processor using pymupdf4llm for text extraction and sectioning."""
 
 import re
+import contextlib
+import io
+import logging
 from pathlib import Path
 from typing import List, Generator
 
@@ -8,6 +11,8 @@ import pymupdf4llm
 
 from .config import config
 from .models import Document, Section, SentenceWindow
+
+logger = logging.getLogger(__name__)
 
 
 class PDFProcessor:
@@ -41,24 +46,30 @@ class PDFProcessor:
             return ""
 
         try:
-            # Use layout-preserving extraction for better page structure
-            if self.use_layout:
-                md_text = pymupdf4llm.to_markdown(
-                    str(path),
-                    page_chunks=True,
-                    # Layout preservation options
-                    write_images=False,
-                    extract_images=False,
-                )
-            else:
-                md_text = pymupdf4llm.to_markdown(str(path))
-            
+            # pymupdf4llm will sometimes emit noisy warnings like:
+            # "Warning - arguments ignored in legacy mode: {...}"
+            # We silence those by capturing stdout/stderr during extraction.
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                # Use layout-preserving extraction for better page structure
+                if self.use_layout:
+                    md_text = pymupdf4llm.to_markdown(
+                        str(path),
+                        page_chunks=True,
+                        # Layout preservation options
+                        write_images=False,
+                        extract_images=False,
+                    )
+                else:
+                    md_text = pymupdf4llm.to_markdown(str(path))
+
             # Handle both string and list returns
             if isinstance(md_text, list):
                 return "\n".join(chunk.get("text", "") for chunk in md_text)
             return str(md_text) if md_text else ""
         except Exception as e:
-            print(f"Error extracting from {pdf_path}: {e}")
+            logger.error("Error extracting from %s: %s", pdf_path, e)
             return ""
 
     def _find_headings_in_text(
@@ -145,15 +156,19 @@ class PDFProcessor:
             return []
 
         try:
-            # Get page-level chunks with text content
-            md_text = pymupdf4llm.to_markdown(
-                str(path),
-                page_chunks=True,
-                write_images=False,
-                extract_images=False,
-            )
+            # Get page-level chunks with text content.
+            # Capture stdout/stderr to suppress noisy legacy-mode warnings.
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                md_text = pymupdf4llm.to_markdown(
+                    str(path),
+                    page_chunks=True,
+                    write_images=False,
+                    extract_images=False,
+                )
         except Exception as e:
-            print(f"Error extracting from {pdf_path}: {e}")
+            logger.error("Error extracting from %s: %s", pdf_path, e)
             return []
 
         if not isinstance(md_text, list):

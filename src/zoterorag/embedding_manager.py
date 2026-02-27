@@ -421,7 +421,7 @@ class EmbeddingManager:
                 tmp.write(pdf_bytes)
                 temp_path = Path(tmp.name)
             
-            logger.info(f"[Embedding] Starting: {document.title[:50]}... ({doc_key})")
+            logger.debug(f"[Embedding] Starting: {document.title[:50]}... ({doc_key})")
 
             # Extract sections (always do this)
             sections, sentence_windows = self.process_document(
@@ -429,13 +429,13 @@ class EmbeddingManager:
                 embed_sentences=self.config.AUTO_EMBED_SENTENCES
             )
             
-            logger.info(f"[Embedding] Extracted {len(sections)} sections from {document.title[:30]}...")
+            logger.debug(f"[Embedding] Extracted {len(sections)} sections from {document.title[:30]}...")
 
             # Embed sections
             section_embeddings = self.embed_batch([s.text for s in sections])
             self.vector_store.add_sections(sections, section_embeddings, document.zotero_key)
             
-            logger.info(f"[Embedding] Embedded {len(sections)} sections")
+            logger.debug(f"[Embedding] Embedded {len(sections)} sections")
 
             # Update metadata
             embedded_docs = self.vector_store.get_embedded_documents()
@@ -451,30 +451,20 @@ class EmbeddingManager:
 
             # Optionally embed sentences in background too
             if sentence_windows and self.config.AUTO_EMBED_SENTENCES:
-                logger.info(f"[Embedding] Processing {len(sentence_windows)} sentence windows...")
-                
+                logger.debug(f"[Embedding] Processing {len(sentence_windows)} sentence windows...")
+
                 sent_embeddings = self.embed_batch([w.text for w in sentence_windows])
                 self.vector_store.add_sentence_windows(
                     sentence_windows, sent_embeddings, document.zotero_key
                 )
-                
-                if callback:
-                    status = EmbeddingStatus(
-                        embedded_sections=len(sections),
-                        embedded_sentences=len(sentence_windows),
-                        is_running=False
-                    )
-                    callback(status)
-            elif not sentence_windows:
-                if callback:
-                    status = EmbeddingStatus(
-                        embedded_sections=len(sections),
-                        is_running=False
-                    )
-                    callback(status)
+
+            # ...existing code...
 
             elapsed = time.time() - start_time
-            logger.info(f"[Embedding] Complete: {document.title[:40]}... ({doc_key}) in {elapsed:.1f}s - {len(sections)} sections, {len(sentence_windows) if sentence_windows else 0} sentences")
+            logger.debug(
+                f"[Embedding] Complete: {document.title[:40]}... ({doc_key}) in {elapsed:.1f}s - "
+                f"{len(sections)} sections, {len(sentence_windows) if sentence_windows else 0} sentences"
+            )
 
         except Exception as e:
             logger.error(f"Failed to embed document {document.zotero_key}: {e}")
@@ -504,7 +494,7 @@ class EmbeddingManager:
                 status = EmbeddingStatus(is_running=True, pending_sections=1)
                 callback(status)
 
-            logger.info(f"[Embedding] Starting: {document.title[:50]}... ({doc_key})")
+            logger.debug(f"[Embedding] Starting: {document.title[:50]}... ({doc_key})")
 
             # Extract sections (always do this)
             sections, sentence_windows = self.process_document(
@@ -512,13 +502,13 @@ class EmbeddingManager:
                 embed_sentences=self.config.AUTO_EMBED_SENTENCES
             )
             
-            logger.info(f"[Embedding] Extracted {len(sections)} sections from {document.title[:30]}...")
+            logger.debug(f"[Embedding] Extracted {len(sections)} sections from {document.title[:30]}...")
 
             # Embed sections
             section_embeddings = self.embed_batch([s.text for s in sections])
             self.vector_store.add_sections(sections, section_embeddings, document.zotero_key)
             
-            logger.info(f"[Embedding] Embedded {len(sections)} sections")
+            logger.debug(f"[Embedding] Embedded {len(sections)} sections")
 
             # Update metadata
             embedded_docs = self.vector_store.get_embedded_documents()
@@ -534,30 +524,20 @@ class EmbeddingManager:
 
             # Optionally embed sentences in background too
             if sentence_windows and self.config.AUTO_EMBED_SENTENCES:
-                logger.info(f"[Embedding] Processing {len(sentence_windows)} sentence windows...")
-                
+                logger.debug(f"[Embedding] Processing {len(sentence_windows)} sentence windows...")
+
                 sent_embeddings = self.embed_batch([w.text for w in sentence_windows])
                 self.vector_store.add_sentence_windows(
                     sentence_windows, sent_embeddings, document.zotero_key
                 )
-                
-                if callback:
-                    status = EmbeddingStatus(
-                        embedded_sections=len(sections),
-                        embedded_sentences=len(sentence_windows),
-                        is_running=False
-                    )
-                    callback(status)
-            elif not sentence_windows:
-                if callback:
-                    status = EmbeddingStatus(
-                        embedded_sections=len(sections),
-                        is_running=False
-                    )
-                    callback(status)
+
+            # ...existing code...
 
             elapsed = time.time() - start_time
-            logger.info(f"[Embedding] Complete: {document.title[:40]}... ({doc_key}) in {elapsed:.1f}s - {len(sections)} sections, {len(sentence_windows) if sentence_windows else 0} sentences")
+            logger.debug(
+                f"[Embedding] Complete: {document.title[:40]}... ({doc_key}) in {elapsed:.1f}s - "
+                f"{len(sections)} sections, {len(sentence_windows) if sentence_windows else 0} sentences"
+            )
 
         except Exception as e:
             logger.error(f"Failed to embed document {document.zotero_key}: {e}")

@@ -7,6 +7,7 @@ Uses the FastMCP framework for simpler implementation.
 
 import logging
 from typing import Any, Optional
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Context
 
@@ -41,30 +42,153 @@ class MCPZoteroServer:
         self.search_engine = SearchEngine(config)
 
         # Cache for document metadata to avoid repeated API calls
+        # NOTE: An embedding/document key can refer to a PDF attachment item.
+        # We keep:
+        #   - _metadata_cache: resolved bibliographic metadata (typically from parent item)
+        #   - _parent_key_cache: attachment key -> parent key resolution
         self._metadata_cache: dict[str, dict] = {}
-        
+        self._parent_key_cache: dict[str, str] = {}
+        self._pdf_stem_to_item_key_cache: dict[str, str] = {}
+
         # Force initialization of the ThreadPoolExecutor by accessing it once
         # This ensures it's ready when we need it for background embedding
         _ = self.embedding_manager.executor
         logger.info("[MCPZoteroServer] EmbeddingManager executor initialized")
-        
-    def shutdown(self):
-        """Shutdown the server."""
-        self.embedding_manager.shutdown()
+
+    def _resolve_parent_key(self, item_key: str) -> str:
+        """Resolve an item key to its bibliographic (parent) key when applicable.
+
+        Many embeddings are keyed by attachment item keys (PDFs). Bibliographic
+        data (title/authors/date/BibTeX) usually lives on the parent item.
+
+        Returns the parent key if known, otherwise the original key.
+        """
+        if not item_key:
+            return item_key
+
+        cached = self._parent_key_cache.get(item_key)
+        if cached:
+            return cached
+
+        try:
+            item = self.zotero_client.get_item(item_key)
+            parent = (item.get("data") or {}).get("parentItem")
+            resolved = parent or item_key
+            self._parent_key_cache[item_key] = resolved
+            return resolved
+        except Exception:
+            # If we can't resolve, fall back to original key.
+            self._parent_key_cache[item_key] = item_key
+            return item_key
+
+    def _resolve_zotero_item_key(self, maybe_doc_key: str) -> str:
+        """Resolve a vector-store document key to an actual Zotero item key.
+
+        In this project, embeddings are often stored under the PDF filename stem
+        (Path.stem) as the vector-store document_key. Zotero metadata, however,
+        is accessible only via the real Zotero item key.
+
+        Strategy:
+        - If the key exists in Zotero as an item, keep it.
+        - Otherwise, try to find an attachment item whose filename stem matches.
+        """
+        if not maybe_doc_key:
+            return maybe_doc_key
+
+        cached = self._pdf_stem_to_item_key_cache.get(maybe_doc_key)
+        if cached:
+            return cached
+
+        # Fast path: does this key exist as a Zotero item key?
+        try:
+            item = self.zotero_client.get_item(maybe_doc_key)
+            if item and item.get("key"):
+                self._pdf_stem_to_item_key_cache[maybe_doc_key] = maybe_doc_key
+                return maybe_doc_key
+        except Exception:
+            pass
+
+        # Slow path: scan for a matching attachment by filename stem.
+        try:
+            url = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items"
+            params = {"itemType": "attachment", "limit": 100}
+
+            while True:
+                resp = self.zotero_client.session.get(url, params=params)
+                if resp.status_code != 200:
+                    break
+                items = resp.json() or []
+                if not items:
+                    break
+
+                for it in items:
+                    data = (it or {}).get("data") or {}
+                    if data.get("itemType") != "attachment":
+                        continue
+                    fname = data.get("filename") or ""
+                    if not fname:
+                        continue
+                    stem = Path(fname).stem
+                    if stem == maybe_doc_key:
+                        key = it.get("key") or data.get("key")
+                        if key:
+                            self._pdf_stem_to_item_key_cache[maybe_doc_key] = key
+                            return key
+
+                # Pagination
+                params["start"] = int(params.get("start", 0)) + int(params.get("limit", 100))
+
+        except Exception:
+            pass
+
+        # Give up
+        self._pdf_stem_to_item_key_cache[maybe_doc_key] = maybe_doc_key
+        return maybe_doc_key
 
     def _get_metadata_for_key(self, item_key: str) -> dict:
-        """Get cached or fresh metadata for an item."""
-        if item_key in self._metadata_cache:
-            return self._metadata_cache[item_key]
+        """Get cached or fresh metadata for an item.
 
-        # Try to get from Zotero
+        If the key refers to a PDF attachment, ZoteroClient.get_item_metadata()
+        traverses parents and returns bibliographic fields from the parent.
+        We additionally normalize caching so that multiple attachment keys of the
+        same parent reuse the same cached metadata.
+        """
+        if not item_key:
+            return {
+                "bibtex": "",
+                "file_path": "",
+                "title": "",
+                "authors": [],
+                "date": "",
+                "item_type": "",
+            }
+
+        # Resolve vector-store doc keys (PDF stems) to real Zotero item keys.
+        item_key = self._resolve_zotero_item_key(item_key)
+
+        # Prefer caching by resolved bibliographic key.
+        resolved_key = self._resolve_parent_key(item_key)
+
+        if resolved_key in self._metadata_cache:
+            meta = dict(self._metadata_cache[resolved_key])
+            # Ensure file_path points to the requested (likely attachment) key.
+            if not meta.get("file_path"):
+                meta["file_path"] = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{item_key}/file"
+            return meta
+
+        # Try to get from Zotero (handles attachment->parent traversal internally)
         metadata = self.zotero_client.get_item_metadata(item_key)
 
         if metadata:
+            # If metadata came back without file_path, prefer attachment file URL.
+            if not metadata.get("file_path"):
+                metadata["file_path"] = f"{self.config.ZOTERO_API_URL.rstrip('/')}/api/users/0/items/{item_key}/file"
+
+            self._metadata_cache[resolved_key] = metadata
+            # Also allow direct lookup by original key.
             self._metadata_cache[item_key] = metadata
             return metadata
 
-        # Return empty metadata structure
         return {
             "bibtex": "",
             "file_path": "",
@@ -73,6 +197,14 @@ class MCPZoteroServer:
             "date": "",
             "item_type": ""
         }
+
+    def shutdown(self):
+        """Gracefully shutdown background resources."""
+        try:
+            if getattr(self, "embedding_manager", None):
+                self.embedding_manager.shutdown()
+        except Exception as e:
+            logger.debug(f"[MCPZoteroServer] shutdown: embedding_manager error: {e}")
 
 
 # Global server instance for business logic
@@ -371,6 +503,75 @@ async def reembed_document(document_key: str) -> dict:
     return {"status": "reembedding", "document_key": document_key}
 
 
+@mcp.tool()
+async def search_sentences(
+    query: str,
+    document_key: Optional[str] = None,
+    top_sections: int = 5,
+    top_sentences: int = 10,
+    ensure_sentence_embeddings: bool = True,
+) -> list[dict]:
+    """Search and return best matching sentence windows.
+
+    This is a sentence-first variant of `search_documents`.
+
+    Pipeline:
+    1) Embed the query
+    2) Retrieve best matching sections (top_sections)
+    3) Ensure sentence windows for these sections are persistently embedded
+    4) Search sentence embeddings and return top_sentences
+
+    Returns enriched results including BibTeX, title, authors, and date.
+    """
+    server = get_server()
+    if not server:
+        return [{"error": "Server not initialized"}]
+
+    results = server.search_engine.search_best_sentences(
+        query=query,
+        document_key=document_key,
+        top_sections=top_sections,
+        top_sentences=top_sentences,
+        ensure_sentence_embeddings=ensure_sentence_embeddings,
+    )
+
+    # Enrich with Zotero metadata (parent item)
+    key_to_metadata: dict[str, dict] = {}
+    for r in results:
+        zotero_key = r.zotero_key
+        if zotero_key and zotero_key not in key_to_metadata:
+            meta = server._get_metadata_for_key(zotero_key)
+            if not meta.get("title"):
+                vs_title = server.search_engine.vector_store.get_document_title(zotero_key)
+                if vs_title:
+                    meta["title"] = vs_title
+            key_to_metadata[zotero_key] = meta
+
+    enriched: list[dict] = []
+    for r in results:
+        result_dict = r.to_dict()
+        zotero_key = r.zotero_key
+
+        if zotero_key and zotero_key in key_to_metadata:
+            meta = key_to_metadata[zotero_key]
+            result_dict["bibtex"] = meta.get("bibtex", "")
+            result_dict["file_path"] = meta.get("file_path", "")
+            result_dict["authors"] = meta.get("authors", [])
+            result_dict["date"] = meta.get("date", "")
+            result_dict["item_type"] = meta.get("item_type", "")
+
+            doc_title = meta.get("title", "")
+            if not doc_title:
+                vs_title = server.search_engine.vector_store.get_document_title(zotero_key)
+                if vs_title:
+                    doc_title = vs_title
+            result_dict["document_title"] = doc_title
+
+        enriched.append(result_dict)
+
+    return enriched
+
+
 # =============================================================================
 # Main entry points
 # =============================================================================
@@ -414,3 +615,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
