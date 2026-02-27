@@ -443,10 +443,8 @@ class EmbeddingManager:
 
             logger.debug(f"[Embedding] Embedded {len(sections)} sections")
 
-            # Update metadata
-            embedded_docs = self.vector_store.get_embedded_documents()
-            embedded_docs[document.zotero_key] = len(sections)
-            self.vector_store.save_embedded_documents(embedded_docs)
+            # Update metadata (atomic)
+            self.vector_store.update_embedded_document(document.zotero_key, len(sections))
 
             if callback:
                 status = EmbeddingStatus(
@@ -526,10 +524,8 @@ class EmbeddingManager:
 
             logger.debug(f"[Embedding] Embedded {len(sections)} sections")
 
-            # Update metadata
-            embedded_docs = self.vector_store.get_embedded_documents()
-            embedded_docs[document.zotero_key] = len(sections)
-            self.vector_store.save_embedded_documents(embedded_docs)
+            # Update metadata (atomic)
+            self.vector_store.update_embedded_document(document.zotero_key, len(sections))
 
             if callback:
                 status = EmbeddingStatus(

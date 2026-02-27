@@ -1,9 +1,11 @@
 """ChromaDB-based vector store with persistence tracking."""
 
+import json
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Optional, List
-import json
 
 import chromadb
 from chromadb.config import Settings
@@ -20,6 +22,9 @@ class VectorStore:
     def __init__(self, persist_directory: str = "./data/vector_store"):
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
+
+        # Protect embedded_docs.json from concurrent read/modify/write corruption.
+        self._embedded_docs_lock = threading.Lock()
 
         self.client = chromadb.PersistentClient(
             path=str(self.persist_directory),
@@ -93,39 +98,89 @@ class VectorStore:
     def get_embedded_documents(self) -> dict[str, int]:
         """Return dict mapping document keys to their section count."""
         meta_path = self.persist_directory / "embedded_docs.json"
-        if meta_path.exists():
-            try:
-                with open(meta_path, "r") as f:
-                    content = f.read().strip()
-                    if content:
-                        return json.loads(content)
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to load embedded_docs.json: {e}. Starting fresh.")
-                # Backup corrupted file
-                backup_path = meta_path.with_suffix(".json.bak")
+        with self._embedded_docs_lock:
+            if meta_path.exists():
                 try:
-                    meta_path.rename(backup_path)
-                    logger.info(f"Backed up corrupted file to {backup_path}")
-                except OSError:
-                    pass
-        return {}
+                    with open(meta_path, "r") as f:
+                        content = f.read().strip()
+                        if content:
+                            return json.loads(content)
+                except (json.JSONDecodeError, IOError) as e:
+                    logger.warning(
+                        f"Failed to load embedded_docs.json: {e}. Starting fresh."
+                    )
+                    # Backup corrupted file
+                    backup_path = meta_path.with_suffix(".json.bak")
+                    try:
+                        meta_path.rename(backup_path)
+                        logger.info(f"Backed up corrupted file to {backup_path}")
+                    except OSError:
+                        pass
+            return {}
 
     def save_embedded_documents(self, docs: dict[str, int], allow_empty: bool = True):
         """Save document embedding metadata.
-        
+
         Args:
             docs: Dictionary of document keys to section counts
             allow_empty: If False, don't save empty dictionaries
         """
         if not docs and not allow_empty:
             return
-            
+
         meta_path = self.persist_directory / "embedded_docs.json"
-        try:
-            with open(meta_path, "w") as f:
-                json.dump(docs, f, sort_keys=True)
-        except IOError as e:
-            logger.error(f"Failed to save embedded_docs.json: {e}")
+
+        # Atomic write: write to temp file then os.replace.
+        # Guarded by a lock to avoid interleaving read/modify/write across threads.
+        with self._embedded_docs_lock:
+            tmp_path = meta_path.with_suffix(".json.tmp")
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump(docs, f, sort_keys=True)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, meta_path)
+            except IOError as e:
+                logger.error(f"Failed to save embedded_docs.json: {e}")
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def update_embedded_document(self, document_key: str, section_count: int) -> None:
+        """Atomically update embedded_docs.json for a single document.
+
+        This avoids lost updates when many threads embed documents concurrently.
+        """
+        meta_path = self.persist_directory / "embedded_docs.json"
+
+        with self._embedded_docs_lock:
+            docs: dict[str, int] = {}
+            if meta_path.exists():
+                try:
+                    content = meta_path.read_text().strip()
+                    if content:
+                        docs = json.loads(content)
+                except (json.JSONDecodeError, OSError):
+                    docs = {}
+
+            docs[document_key] = section_count
+
+            tmp_path = meta_path.with_suffix(".json.tmp")
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump(docs, f, sort_keys=True)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, meta_path)
+            except OSError as e:
+                logger.error(f"Failed to update embedded_docs.json: {e}")
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
 
     # --- Section operations ---
 

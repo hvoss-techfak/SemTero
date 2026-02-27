@@ -465,22 +465,30 @@ class ZoteroClient:
         try:
             # Follow redirect manually since we need the actual file URL
             response = self.session.get(url, stream=True, allow_redirects=False)
-            
+
             # Handle redirect (local API returns 302 to local file path)
             if response.status_code == 302:
                 redirect_url = response.headers.get("Location")
                 if redirect_url and redirect_url.startswith("file://"):
                     # Local file - read directly
                     source_path = redirect_url.replace("file://", "")
-                    return self._read_local_pdf(source_path)
-                    
+                    data = self._read_local_pdf(source_path)
+                    # Guard against empty files
+                    if not data:
+                        return None
+                    return data
+
             if response.status_code == 204:  # No content
                 return None
-            
+
             response.raise_for_status()
-            
-            return response.content
-            
+
+            data = response.content
+            # Guard: sometimes Zotero returns 200 with an empty body
+            if not data:
+                return None
+            return data
+
         except requests.RequestException:
             return None
 
@@ -633,21 +641,27 @@ class ZoteroClient:
 
         try:
             response = self.session.get(url, stream=True, allow_redirects=False)
-            
+
             # Handle redirect (local API returns 302 to local file path)
             if response.status_code == 302:
                 redirect_url = response.headers.get("Location")
                 if redirect_url and redirect_url.startswith("file://"):
                     source_path = redirect_url.replace("file://", "")
-                    return self._read_local_pdf(source_path)
-                    
+                    data = self._read_local_pdf(source_path)
+                    if not data:
+                        return None
+                    return data
+
             if response.status_code == 204:  # No content
                 return None
-            
+
             response.raise_for_status()
-            
-            return response.content
-            
+
+            data = response.content
+            if not data:
+                return None
+            return data
+
         except requests.RequestException:
             return None
 
