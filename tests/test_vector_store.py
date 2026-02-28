@@ -316,3 +316,54 @@ class TestVectorStore:
             out = store.get_sentence_texts_by_ids(["a", "b"])
 
         assert out == {"a": "A text", "b": "B text"}
+
+    # --- Test is_document_embedded ---
+
+    def test_is_document_embedded_true_when_ids_exist(self, temp_dir):
+        from zoterorag.vector_store import VectorStore
+
+        mock_client = MagicMock()
+        sentences_collection = MagicMock()
+        mock_client.get_or_create_collection.side_effect = lambda name: sentences_collection
+        type(sentences_collection).count = PropertyMock(return_value=0)
+
+        # dimension detection call
+        sentences_collection.get.return_value = {"ids": [], "embeddings": []}
+
+        # is_document_embedded call
+        def get_side_effect(*args, **kwargs):
+            if kwargs.get("where") == {"document_key": "doc1"}:
+                return {"ids": ["x"]}
+            return {"ids": [], "embeddings": []}
+
+        sentences_collection.get.side_effect = get_side_effect
+
+        with patch("zoterorag.vector_store.chromadb.PersistentClient", return_value=mock_client):
+            store = VectorStore(persist_directory=str(temp_dir))
+            assert store.is_document_embedded("doc1") is True
+
+    def test_is_document_embedded_falls_back_when_limit_unsupported(self, temp_dir):
+        from zoterorag.vector_store import VectorStore
+
+        mock_client = MagicMock()
+        sentences_collection = MagicMock()
+        mock_client.get_or_create_collection.side_effect = lambda name: sentences_collection
+        type(sentences_collection).count = PropertyMock(return_value=0)
+
+        # dimension detection call
+        sentences_collection.get.return_value = {"ids": [], "embeddings": []}
+
+        def get_side_effect(*args, **kwargs):
+            # First call with limit raises TypeError
+            if "limit" in kwargs:
+                raise TypeError("limit unsupported")
+            if kwargs.get("where") == {"document_key": "doc2"}:
+                return {"ids": ["y"]}
+            return {"ids": []}
+
+        sentences_collection.get.side_effect = get_side_effect
+
+        with patch("zoterorag.vector_store.chromadb.PersistentClient", return_value=mock_client):
+            store = VectorStore(persist_directory=str(temp_dir))
+            assert store.is_document_embedded("doc2") is True
+

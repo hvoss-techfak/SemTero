@@ -114,11 +114,20 @@ class ZoteroRAGApplication:
                 # Get currently embedded docs
                 embedded = self.embedding_manager.vector_store.get_embedded_documents()
 
-                # Filter to only new/updated documents
-                pending = [
-                    doc for doc in all_docs_with_pdfs
-                    if doc.zotero_key not in embedded or embedded[doc.zotero_key] == 0
-                ]
+                # Filter to only new/updated documents.
+                # Prefer the DB-backed existence check so we don't re-embed when the
+                # embedded_docs.json metadata is missing/stale.
+                pending = []
+                for doc in all_docs_with_pdfs:
+                    try:
+                        if self.embedding_manager.vector_store.is_document_embedded(doc.zotero_key):
+                            continue
+                    except Exception:
+                        # Fall back to metadata file check.
+                        pass
+
+                    if doc.zotero_key not in embedded or embedded.get(doc.zotero_key, 0) == 0:
+                        pending.append(doc)
 
                 if not pending:
                     logger.info(f"[AutoEmbed] All {len(all_docs_with_pdfs)} documents already embedded")
@@ -467,3 +476,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

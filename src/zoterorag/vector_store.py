@@ -260,7 +260,9 @@ class VectorStore:
             (ids, distances, metadatas)
         """
         where = {"document_key": document_key} if document_key else None
-        include: list[str] = ["distances", "metadatas"]
+        include: list[
+            str
+        ] = ["distances", "metadatas"]  # keep runtime flexible; chroma expects these keys
         if include_documents:
             include.append("documents")
 
@@ -268,7 +270,7 @@ class VectorStore:
             query_embeddings=[query_embedding],
             n_results=max(1, int(top_k)),
             where=where,
-            include=include,
+            include=include,  # type: ignore[arg-type]
         )
 
         if not results or not results.get("ids") or not results["ids"][0]:
@@ -305,6 +307,29 @@ class VectorStore:
             if sid and doc is not None:
                 out[str(sid)] = str(doc)
         return out
+
+    def is_document_embedded(self, document_key: str) -> bool:
+        """Return True if at least one sentence vector exists for this document.
+
+        This is a DB-backed check (not based on embedded_docs.json), so it keeps
+        working even if the metadata file is stale/corrupted.
+        """
+        if not document_key:
+            return False
+        try:
+            res = self.sentences_collection.get(where={"document_key": document_key}, limit=1)
+            ids = res.get("ids") if isinstance(res, dict) else None
+            return bool(ids)
+        except TypeError:
+            # Some mocks/older chroma versions may not support limit; fall back.
+            try:
+                res = self.sentences_collection.get(where={"document_key": document_key})
+                ids = res.get("ids") if isinstance(res, dict) else None
+                return bool(ids)
+            except Exception:
+                return False
+        except Exception:
+            return False
 
     # --- Cleanup ---
 

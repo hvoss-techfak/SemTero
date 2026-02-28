@@ -156,7 +156,7 @@ class MCPZoteroServer:
             if r.get("relevance_score", 0) >= min_relevance:
                 ret.append(r)
             else:
-                print(f"[DEBUG] Filtering out result with relevance {r.get('relevance_score', 0)} below threshold {min_relevance}")
+                print(f"[DEBUG] Filtering out result with relevance {r.get('relevance_score', 0)} below threshold {min_relevance}, sentence: {r.get('text', '')[:100]}...")
         
         return ret
 

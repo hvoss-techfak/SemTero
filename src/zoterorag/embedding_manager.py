@@ -176,11 +176,34 @@ class EmbeddingManager:
         callback: Optional[Callable[[EmbeddingStatus], None]] = None,
     ) -> Future:
         try:
+            # Prefer DB-backed check: if any sentence vectors exist, it's embedded.
+            if self.vector_store.is_document_embedded(document.zotero_key):
+                logger.info(
+                    "[Embedding] Skipping already-embedded document %s (%s)",
+                    (document.title or "")[:60],
+                    document.zotero_key,
+                )
+
+                self._update_progress(
+                    EmbeddingStatus(
+                        processed_documents=self.get_embedding_status().processed_documents + 1,
+                        is_running=True,
+                    )
+                )
+
+                if callback:
+                    callback(EmbeddingStatus(is_running=True))
+
+                f: Future = Future()
+                f.set_result(None)
+                return f
+
+            # Fall back to metadata file check (kept for compatibility)
             embedded = self.vector_store.get_embedded_documents()
             if embedded.get(document.zotero_key, 0) > 0:
                 logger.info(
                     "[Embedding] Skipping already-embedded document %s (%s)",
-                    document.title[:60],
+                    (document.title or "")[:60],
                     document.zotero_key,
                 )
 
