@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from fastmcp import Client  # type: ignore
+from fastmcp.client.transports.stdio import PythonStdioTransport  # type: ignore
 
 
 def format_json(data: dict | list) -> str:
@@ -228,9 +229,11 @@ async def main():
         return
 
     # Wire up a stdio client that launches our FastMCP server.
-    server_cmd = [sys.executable, str(Path(__file__).parent.parent / "main.py")]
+    # FastMCP 3.x doesn't accept an argv list for transport inference; provide an explicit transport.
+    server_script = Path(__file__).parent / "main.py"
+    transport = PythonStdioTransport(script_path=server_script, python_cmd=sys.executable)
 
-    async with Client(server_cmd) as client:
+    async with Client(transport) as client:
         try:
             if args.all or args.library:
                 await run_library_items(client, limit=args.limit)

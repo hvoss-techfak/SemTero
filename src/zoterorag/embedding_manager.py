@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 import tempfile
 import threading
@@ -55,10 +56,18 @@ class EmbeddingManager:
         with self._progress_lock:
             if status.total_documents > 0:
                 self._embedding_progress.total_documents = status.total_documents
+
             if status.processed_documents > 0:
-                self._embedding_progress.processed_documents = status.processed_documents
+                # Never allow processed_documents to go backwards.
+                self._embedding_progress.processed_documents = max(
+                    self._embedding_progress.processed_documents,
+                    status.processed_documents,
+                )
+
             self._embedding_progress.embedded_sections += status.embedded_sections
             self._embedding_progress.embedded_sentences += status.embedded_sentences
+
+            # is_running is a state flag; allow it to flip either direction.
             self._embedding_progress.is_running = status.is_running
 
     def start_embedding_job(self, total_documents: int):
@@ -79,7 +88,7 @@ class EmbeddingManager:
     def executor(self) -> ThreadPoolExecutor:
         """Lazy initialization of thread pool."""
         if self._executor is None:
-            max_workers = getattr(self.config, 'MAX_EMBEDDING_WORKERS', 1)
+            max_workers = getattr(self.config, 'MAX_EMBEDDING_WORKERS', max(1,os.cpu_count()//2))
             logger.info(f"[EmbeddingManager] Initializing ThreadPoolExecutor with {max_workers} workers")
             self._executor = ThreadPoolExecutor(max_workers=max_workers)
             logger.info(f"[EmbeddingManager] ThreadPoolExecutor initialized successfully")
@@ -263,40 +272,6 @@ class EmbeddingManager:
         
         return scores
 
-    def rerank_documents(
-        self,
-        query: str,
-        documents: List[tuple[str, float]]
-    ) -> List[tuple[str, float]]:
-        """Rerank document text+score pairs using the reranker model.
-        
-        This is the main entry point for reranking. It takes documents that were
-        initially scored via embedding similarity and re-scores them using
-        the dedicated reranker model.
-        
-        Args:
-            query: The search query
-            documents: List of (text, initial_score) tuples to rerank
-            
-        Returns:
-            List of (text, rerank_score) tuples sorted by rerank_score descending
-        """
-        if not documents:
-            return []
-        
-        candidates = [doc[0] for doc in documents]
-        scores = self._rerank(query, candidates)
-        
-        # Combine original text with new rerank scores
-        results = list(zip(candidates, scores))
-        
-        # Sort by rerank score descending
-        results.sort(key=lambda x: x[1], reverse=True)
-        
-        return results
-
-    # --- Document processing ---
-
     def process_document(
         self,
         document: Document,
@@ -368,15 +343,47 @@ class EmbeddingManager:
         callback: Optional[Callable[[EmbeddingStatus], None]] = None
     ) -> Future:
         """Submit document for background embedding, fetching PDF on-demand.
-        
+
         Args:
             document: The document to embed
             zotero_client: ZoteroClient instance to fetch PDF from
             callback: Optional progress callback
-            
+
         Returns:
             Future object representing the async task
         """
+        # Idempotency guard: don't re-embed already embedded docs.
+        try:
+            embedded = self.vector_store.get_embedded_documents()
+            if embedded.get(document.zotero_key, 0) > 0:
+                logger.info(
+                    "[Embedding] Skipping already-embedded document %s (%s)",
+                    document.title[:60],
+                    document.zotero_key,
+                )
+
+                # Even if we skip the work, count this document as processed for the
+                # current embedding job so progress reaches 100%.
+                self._update_progress(
+                    EmbeddingStatus(
+                        processed_documents=self.get_embedding_status().processed_documents + 1,
+                        is_running=True,
+                    )
+                )
+
+                if callback:
+                    # Emit a no-op progress update so callers waiting on activity
+                    # still see that the task completed.
+                    callback(EmbeddingStatus(is_running=True))
+
+                f: Future = Future()
+                f.set_result(None)
+                return f
+        except Exception as e:
+            # If metadata is unreadable, fall back to embedding rather than risking
+            # skipping work incorrectly.
+            logger.debug("[Embedding] Skip-check failed for %s: %s", document.zotero_key, e)
+
         return self.executor.submit(
             self._embed_document_from_zotero_task,
             document, zotero_client, callback

@@ -36,7 +36,7 @@ class Config:
     MAX_EMBEDDING_WORKERS: int = int(os.getenv("MAX_EMBEDDING_WORKERS", os.cpu_count()//2))
 
     # Batch embedding settings
-    BATCH_EMBEDDING_SIZE: int = int(os.getenv("BATCH_EMBEDDING_SIZE", "128"))  # Number of texts to embed in one batch call
+    BATCH_EMBEDDING_SIZE: int = int(os.getenv("BATCH_EMBEDDING_SIZE", "512"))  # Number of texts to embed in one batch call
 
     # PDF processing options
     PAGE_SPLITS: int = int(os.getenv("PAGE_SPLITS", "4"))  # Number of sections to split each page into

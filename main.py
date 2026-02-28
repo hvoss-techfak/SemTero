@@ -90,23 +90,23 @@ class ZoteroRAGApplication:
 
     def start_background_embedding(self):
         """Start background embedding for pending documents.
-        
+
         This runs in a separate thread to avoid blocking the main server.
         """
         if not self.embedding_manager or not self.server:
             logger.warning("Cannot start embedding - services not initialized")
             return
-            
+
         # Get Zotero client from server
         zotero_client = self.server.zotero_client
-        
+
         def run_embedding():
             try:
                 logger.info("[AutoEmbed] Checking for pending documents...")
-                
+
                 # Get all docs with PDFs
                 all_docs_with_pdfs = list(zotero_client.get_documents_with_pdfs())
-                
+
                 if not all_docs_with_pdfs:
                     logger.info("[AutoEmbed] No documents with PDFs found")
                     return
@@ -126,32 +126,48 @@ class ZoteroRAGApplication:
 
                 # Start embedding job with progress tracking
                 self.embedding_manager.start_embedding_job(len(pending))
-                
+
                 # Emit initial progress line
                 self._emit_embed_progress(force=True)
 
                 # Submit all pending documents for background embedding
                 futures = []
-                for i, doc in enumerate(pending):
-                    def make_callback(index: int):
-                        def cb(status):
-                            # Update global progress after each document completes
-                            status.processed_documents = index + 1
-                            self.embedding_manager._update_progress(status)
+                for doc in pending:
 
-                            # Rate-limited progress output
-                            self._emit_embed_progress()
-                        return cb
+                    def cb(status):
+                        # Only update additive counters via status; processed_documents is handled
+                        # in a Future done-callback to reflect completion order (monotonic).
+                        self.embedding_manager._update_progress(status)
+                        self._emit_embed_progress()
 
                     try:
                         future = self.embedding_manager.embed_document_async_with_client(
                             doc,
                             zotero_client,
-                            callback=make_callback(i)
+                            callback=cb,
                         )
                         futures.append(future)
                     except Exception as e:
                         logger.error(f"[AutoEmbed] Failed to submit {doc.zotero_key}: {e}")
+
+                # Track completion order monotonically.
+                completed_lock = threading.Lock()
+                completed_count = 0
+
+                def on_done(_fut):
+                    nonlocal completed_count
+                    with completed_lock:
+                        completed_count += 1
+                        self.embedding_manager._update_progress(
+                            type(self.embedding_manager.get_embedding_status())(
+                                processed_documents=completed_count,
+                                is_running=True,
+                            )
+                        )
+                    self._emit_embed_progress()
+
+                for f in futures:
+                    f.add_done_callback(on_done)
 
                 logger.info(f"[AutoEmbed] Started embedding {len(pending)} documents in background")
 
@@ -163,11 +179,15 @@ class ZoteroRAGApplication:
                         # individual failures are already logged elsewhere
                         pass
 
+                # Mark job finished + emit final progress line.
+                self.embedding_manager._update_progress(
+                    type(self.embedding_manager.get_embedding_status())(is_running=False)
+                )
                 self._emit_embed_progress(force=True)
 
             except Exception as e:
                 logger.error(f"[AutoEmbed] Error during auto-embedding: {e}")
-        
+
         # Run in a separate thread to not block the MCP server
         embed_thread = threading.Thread(target=run_embedding, daemon=True)
         embed_thread.start()
