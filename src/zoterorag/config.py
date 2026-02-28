@@ -39,7 +39,7 @@ class Config:
     BATCH_EMBEDDING_SIZE: int = int(os.getenv("BATCH_EMBEDDING_SIZE", "512"))  # Number of texts to embed in one batch call
 
     # PDF processing options
-    PAGE_SPLITS: int = int(os.getenv("PAGE_SPLITS", "4"))  # Number of sections to split each page into
+    PAGE_SPLITS: int = int(os.getenv("PAGE_SPLITS", "500"))  # Number of sections to split each page into
 
     @classmethod
     def from_file(cls, path: str) -> "Config":

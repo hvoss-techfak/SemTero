@@ -14,10 +14,10 @@ from typing import Optional, List, Callable
 import ollama
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .config import Config
-from .models import Document, Section, SentenceWindow, EmbeddingStatus
-from .pdf_processor import PDFProcessor
-from .vector_store import VectorStore
+from zoterorag.config import Config
+from zoterorag.models import Document, Section, SentenceWindow, EmbeddingStatus
+from zoterorag.pdf_processor import PDFProcessor
+from zoterorag.vector_store import VectorStore
 
 
 logger = logging.getLogger(__name__)

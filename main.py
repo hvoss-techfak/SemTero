@@ -364,6 +364,19 @@ def main():
         action="store_true", 
         help="Test Zotero API connectivity and exit"
     )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default="sse",
+        choices=["stdio", "http", "sse", "streamable-http"],
+        help="Transport protocol to use (default: stdio)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=23120,
+        help="Port for HTTP/SSE transports (default: 23120)"
+    )
     args = parser.parse_args()
 
     app = ZoteroRAGApplication()
@@ -404,14 +417,53 @@ def main():
     # Start running
     app._running = True
     
-    try:
-        if args.daemon:
-            app.run_daemon()
-        else:
-            app.run_mcp_server()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        app.shutdown()
+    # Handle transport selection
+    if args.transport != "stdio":
+        # Run with HTTP/SSE/streamable-http transport
+        import anyio
+        
+        # Initialize services first
+        if not app.initialize():
+            sys.exit(1)
+        
+        logger.info("Testing service connections...")
+        
+        zotero_ok = app.test_zotero_connection()
+        ollama_ok = app.test_ollama_connection()
+
+        if not zotero_ok:
+            logger.warning("Zotero connection failed - some features may not work")
+
+        if not ollama_ok:
+            logger.error("Ollama connection required for embeddings")
+            sys.exit(1)
+
+        # Start background embedding automatically
+        app.start_background_embedding()
+        
+        # Run the server with specified transport
+        logger.info(f"MCP server starting with {args.transport} transport on port {args.port}...")
+        
+        try:
+            if args.transport == "sse":
+                mcp.run(transport="sse", host="127.0.0.1", port=args.port)
+            elif args.transport == "http":
+                mcp.run(transport="http", host="127.0.0.1", port=args.port)
+            elif args.transport == "streamable-http":
+                mcp.run(transport="streamable-http", host="127.0.0.1", port=args.port)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            app.shutdown()
+    else:
+        try:
+            if args.daemon:
+                app.run_daemon()
+            else:
+                app.run_mcp_server()
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
+            app.shutdown()
 
 
 if __name__ == "__main__":

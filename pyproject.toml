@@ -12,6 +12,7 @@ dependencies = [
     "tenacity>=8.0",
     "pymupdf-layout",
     "fastmcp",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -2,9 +2,13 @@
 """MCP Client - Test script to call ZoteroRAG MCP server methods.
 
 Usage:
-    uv run scripts/mcp_client.py [--search QUERY] [--library] [--status]
+    uv run mcp_client.py --search QUERY     # Connect via SSE to running server
+    uv run mcp_client.py --library          # Show library items  
+    uv run mcp_client.py --status           # Show embedding status
+    uv run mcp_client.py --stdio            # Use stdio (spawns new server)
 
-This script calls the FastMCP tools over stdio and displays results nicely.
+This script can connect to an already-running MCP server via SSE,
+or spawn a new server process via stdio (legacy behavior).
 """
 
 import argparse
@@ -17,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from fastmcp import Client  # type: ignore
+from fastmcp.client.transports.sse import SSETransport  # type: ignore
 from fastmcp.client.transports.stdio import PythonStdioTransport  # type: ignore
 
 
@@ -112,8 +117,8 @@ async def run_search(client: Client, query: str):
             "search_documents",
             {
                 "query": query,
-                "top_sections": 5,
-                "top_sentences_per_section": 3,
+                "top_sections": 10,
+                "top_sentences_per_section": 10,
             },
         )
 
@@ -281,6 +286,23 @@ async def main():
         default=10,
         help="Limit for library items (default: 10)"
     )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=23120,
+        help="Port for SSE/HTTP connection (default: 23120)"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host for SSE/HTTP connection (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--stdio",
+        action="store_true",
+        help="Use stdio transport instead of SSE (spawns new server process)"
+    )
 
     args = parser.parse_args()
 
@@ -289,10 +311,17 @@ async def main():
         parser.print_help()
         return
 
-    # Wire up a stdio client that launches our FastMCP server.
-    # FastMCP 3.x doesn't accept an argv list for transport inference; provide an explicit transport.
-    server_script = Path(__file__).parent / "main.py"
-    transport = PythonStdioTransport(script_path=server_script, python_cmd=sys.executable)
+    # Create the appropriate transport based on mode
+    if args.stdio:
+        # Legacy behavior: spawn a new server process via stdio
+        server_script = Path(__file__).parent / "main.py"
+        transport = PythonStdioTransport(script_path=server_script, python_cmd=sys.executable)
+        print(f"Using stdio transport (spawning server)...")
+    else:
+        # New behavior: connect to already-running server via SSE
+        url = f"http://{args.host}:{args.port}/sse"
+        transport = SSETransport(url=url)
+        print(f"Connecting to {url}...")
 
     async with Client(transport) as client:
         try:

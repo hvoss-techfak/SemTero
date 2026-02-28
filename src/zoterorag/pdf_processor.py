@@ -325,6 +325,25 @@ class PDFProcessor:
             
             if not lines:
                 continue
+
+            #combine lines to complete sentences and resplit based on sentences
+            sentence_lines = []
+            current_sentence = ""
+            for line in lines:
+                current_sentence += " " + line.strip()
+                if re.search(r'[.!?]$', line.strip()):
+                    sentence_lines.append(current_sentence.strip())
+                    current_sentence = ""
+            if current_sentence.strip():
+                sentence_lines.append(current_sentence.strip())
+            lines = sentence_lines
+
+            #resplit into sentences
+            new_lines = []
+            for line in lines:
+                split_sentences = re.split(r'(?<=[.!?])\s+', line)
+                new_lines.extend([s.strip() for s in split_sentences if s.strip()])
+            lines = new_lines
             
             # Calculate split size based on number of splits per page
             num_splits = self.page_splits
@@ -342,7 +361,7 @@ class PDFProcessor:
                 if not section_lines:
                     continue
                 
-                section_text = "\n".join(section_lines)
+                section_text = " ".join(section_lines)
                 
                 # Sanitize markdown formatting from extracted text
                 sanitized_text = self.sanitize_markdown(section_text)
