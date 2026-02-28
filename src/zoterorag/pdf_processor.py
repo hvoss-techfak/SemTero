@@ -11,6 +11,7 @@ import pymupdf4llm
 
 from .config import config
 from .models import Document, Sentence
+from .citation_extractor import extract_citation_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,10 @@ class PDFProcessor:
         return "\n".join(lines)
 
     def extract_quarter_sections(self, pdf_path: str | Path) -> List[Sentence]:
+        """Backward-compatible alias for `extract_sentences` to avoid breaking existing code."""
+        return self.extract_sentences(pdf_path)
+
+    def extract_sentences(self, pdf_path: str | Path) -> List[Sentence]:
         """Extract per-page sentence chunks.
 
         This keeps the robust page-chunk extraction and page-splitting logic formerly
@@ -153,6 +158,19 @@ class PDFProcessor:
         path = Path(pdf_path)
         if not path.exists():
             return []
+
+        # Best-effort citation extraction. This uses PyMuPDF directly and may produce
+        # slightly different sentence strings compared to pymupdf4llm. We attach
+        # metadata by exact sentence match (best-effort) or by a whitespace-normalized
+        # match fallback.
+        citations_by_sentence: dict[str, object] = {}
+        citations_by_normalized: dict[str, object] = {}
+        try:
+            extracted = extract_citation_metadata(path)
+            citations_by_sentence = extracted
+            citations_by_normalized = {self._normalize_ws(k): v for k, v in extracted.items()}
+        except Exception as e:
+            logger.debug("Citation extraction failed for %s: %s", path, e)
 
         try:
             buf_out = io.StringIO()
@@ -176,6 +194,8 @@ class PDFProcessor:
                 page=1,
                 page_section=None,
                 text=sanitized_text,
+                citations_by_sentence=citations_by_sentence,
+                citations_by_normalized=citations_by_normalized,
             )
 
         sentences: List[Sentence] = []
@@ -199,6 +219,11 @@ class PDFProcessor:
                     current_sentence = ""
             if current_sentence.strip():
                 sentence_lines.append(current_sentence.strip())
+
+            # only keep sentences with more than 3 words (filter out noise)
+            sentence_lines = [s for s in sentence_lines if len(s.split()) > 3]
+            if not sentence_lines:
+                continue
 
             # Re-split into sentences (defensive)
             normalized: list[str] = []
@@ -233,11 +258,16 @@ class PDFProcessor:
                     page_section=i + 1,
                     text=sanitized,
                     start_sentence_index=sentence_index,
+                    citations_by_sentence=citations_by_sentence,
+                    citations_by_normalized=citations_by_normalized,
                 )
                 sentences.extend(part_sentences)
                 sentence_index += len(part_sentences)
 
         return sentences
+
+    def _normalize_ws(self, s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "")).strip()
 
     def _sentences_from_text(
         self,
@@ -246,6 +276,8 @@ class PDFProcessor:
         page_section: int | None,
         text: str,
         start_sentence_index: int = 0,
+        citations_by_sentence: dict[str, object] | None = None,
+        citations_by_normalized: dict[str, object] | None = None,
     ) -> List[Sentence]:
         sentence_list = re.split(r"(?<=[.!?])\s+", text)
         sentence_list = [s.strip() for s in sentence_list if s.strip()]
@@ -253,6 +285,20 @@ class PDFProcessor:
         out: List[Sentence] = []
         for i, sent in enumerate(sentence_list):
             idx = start_sentence_index + i
+
+            citation_numbers: list[int] = []
+            referenced_texts: list[str] = []
+            referenced_bibtex: list[str] = []
+            if citations_by_sentence:
+                meta = citations_by_sentence.get(sent)
+                if meta is None and citations_by_normalized:
+                    meta = citations_by_normalized.get(self._normalize_ws(sent))
+                if meta is not None:
+                    # citation_extractor.CitationMetadata dataclass
+                    citation_numbers = list(getattr(meta, "citation_numbers", []) or [])
+                    referenced_texts = list(getattr(meta, "referenced_texts", []) or [])
+                    referenced_bibtex = list(getattr(meta, "referenced_bibtex", []) or [])
+
             out.append(
                 Sentence(
                     id=f"{document_id}_sent_{idx}",
@@ -262,6 +308,9 @@ class PDFProcessor:
                     sentence_index=idx,
                     text=sent,
                     is_embedded=False,
+                    citation_numbers=citation_numbers,
+                    referenced_texts=referenced_texts,
+                    referenced_bibtex=referenced_bibtex,
                 )
             )
 

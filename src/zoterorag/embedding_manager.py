@@ -102,6 +102,7 @@ class EmbeddingManager:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def _embed_text(self, texts: List[str]) -> List[List[float]]:
+        print(f"Embedding single text (batch size 1): {texts[0][:60]}...")
         response = ollama.embeddings(
             model=self.config.EMBEDDING_MODEL,
             prompt=texts[0],
@@ -110,6 +111,7 @@ class EmbeddingManager:
         return [response["embedding"]]
 
     def embed_text(self, text: str) -> List[float]:
+        print(f"Embedding text non underscore: {text[:60]}...")
         response = ollama.embeddings(
             model=self.config.EMBEDDING_MODEL,
             prompt=text,
@@ -131,6 +133,7 @@ class EmbeddingManager:
                 normalized.append(str(t))
 
         batch_size = getattr(self.config, "BATCH_EMBEDDING_SIZE", 32)
+        print(f"Embedding batch of {len(normalized)} texts with batch size {batch_size}...")
         all_embeddings: List[List[float]] = []
 
         for i in range(0, len(normalized), batch_size):

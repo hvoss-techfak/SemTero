@@ -81,7 +81,7 @@ class TestExtractQuarterSections:
     
     def test_extract_quarter_sections_nonexistent_file(self, processor):
         """Should return empty list for nonexistent file."""
-        result = processor.extract_quarter_sections("/nonexistent/file.pdf")
+        result = processor.extract_sentences("/nonexistent/file.pdf")
         assert result == []
     
     @patch('zoterorag.pdf_processor.pymupdf4llm.to_markdown')
@@ -90,7 +90,7 @@ class TestExtractQuarterSections:
         mock_to_markdown.return_value = "Single page text content."
 
         with patch('pathlib.Path.exists', return_value=True):
-            result = processor.extract_quarter_sections("/test.pdf")
+            result = processor.extract_sentences("/test.pdf")
 
         assert len(result) >= 1
         assert isinstance(result[0], Sentence)
@@ -105,7 +105,7 @@ class TestExtractQuarterSections:
         ]
         
         with patch('pathlib.Path.exists', return_value=True):
-            result = processor.extract_quarter_sections("/test.pdf")
+            result = processor.extract_sentences("/test.pdf")
         
         # With page_splits=4 and only ~3 lines on first page + some on second,
         # should create sections
@@ -120,7 +120,7 @@ class TestExtractQuarterSections:
         ]
         
         with patch('pathlib.Path.exists', return_value=True):
-            result = processor.extract_quarter_sections("/test.pdf")
+            result = processor.extract_sentences("/test.pdf")
         
         # Empty pages should produce no sections
         assert len(result) == 0
@@ -131,7 +131,7 @@ class TestExtractQuarterSections:
         mock_to_markdown.side_effect = Exception("PDF error")
         
         with patch('pathlib.Path.exists', return_value=True):
-            result = processor.extract_quarter_sections("/test.pdf")
+            result = processor.extract_sentences("/test.pdf")
         
         assert result == []
 

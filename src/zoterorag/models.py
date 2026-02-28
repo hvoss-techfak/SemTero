@@ -2,6 +2,10 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+
+CitationReturnMode = Literal["sentence", "bibtex", "both"]
 
 
 @dataclass
@@ -27,6 +31,15 @@ class Sentence:
 
     This replaces the previous section/window hierarchy: the smallest retrieval unit
     is now a single sentence.
+
+    Citation metadata:
+        When extracted from scientific PDFs, a sentence may cite bibliography items
+        like "... structure [5, 2, 35]". During embedding we keep:
+        - citation_numbers: numeric IDs seen in bracket citations
+        - referenced_bibtex: resolved BibTeX entries (best-effort)
+        - referenced_texts: raw reference strings from the PDF bibliography (best-effort)
+
+        These fields are optional and may be empty.
     """
 
     id: str  # composite: doc_key + "_sent_" + sentence_index
@@ -36,6 +49,10 @@ class Sentence:
     sentence_index: int
     text: str
     is_embedded: bool = False
+
+    citation_numbers: list[int] = field(default_factory=list)
+    referenced_bibtex: list[str] = field(default_factory=list)
+    referenced_texts: list[str] = field(default_factory=list)
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -58,6 +75,10 @@ class SearchResult:
     date: str = ""
     item_type: str = ""
 
+    cited_bibtex: list[str] = field(default_factory=list)
+    cited_reference_texts: list[str] = field(default_factory=list)
+    citation_numbers: list[int] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return {
             "text": self.text,
@@ -71,6 +92,9 @@ class SearchResult:
             "authors": self.authors,
             "date": self.date,
             "item_type": self.item_type,
+            "cited_bibtex": self.cited_bibtex,
+            "cited_reference_texts": self.cited_reference_texts,
+            "citation_numbers": self.citation_numbers,
         }
 
 

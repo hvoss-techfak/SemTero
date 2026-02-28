@@ -165,6 +165,81 @@ class TestVectorStore:
             store.add_sentences(sentences, embeddings, "doc1")
             sentences_collection.upsert.assert_called_once()
 
+    def test_add_sentences_persists_citation_metadata(self, temp_dir):
+        from zoterorag.vector_store import VectorStore
+
+        mock_client = MagicMock()
+        sentences_collection = MagicMock()
+
+        def get_or_create(name):
+            return sentences_collection
+
+        mock_client.get_or_create_collection.side_effect = get_or_create
+        type(sentences_collection).count = PropertyMock(return_value=0)
+
+        with patch("zoterorag.vector_store.chromadb.PersistentClient", return_value=mock_client):
+            store = VectorStore(persist_directory=str(temp_dir))
+
+            sentences = [
+                Sentence(
+                    id="doc_sent_0",
+                    document_id="doc1",
+                    page=1,
+                    page_section=1,
+                    sentence_index=0,
+                    text="This is a sentence [1].",
+                    citation_numbers=[1],
+                    referenced_texts=["A. Author. Title. 2020."],
+                    referenced_bibtex=["@article{author20201, title={Title}}"],
+                )
+            ]
+            embeddings = [[0.1] * 8]
+
+            store.add_sentences(sentences, embeddings, "doc1")
+
+            assert sentences_collection.upsert.called
+            kwargs = sentences_collection.upsert.call_args.kwargs
+            metas = kwargs.get("metadatas")
+            assert isinstance(metas, list) and metas
+            assert metas[0]["citation_numbers"] == [1]
+            assert metas[0]["referenced_texts"]
+            assert metas[0]["referenced_bibtex"]
+
+    def test_add_sentences_skips_empty_citation_lists_in_metadata(self, temp_dir):
+        from zoterorag.vector_store import VectorStore
+
+        mock_client = MagicMock()
+        sentences_collection = MagicMock()
+
+        mock_client.get_or_create_collection.side_effect = lambda name: sentences_collection
+        type(sentences_collection).count = PropertyMock(return_value=0)
+
+        with patch("zoterorag.vector_store.chromadb.PersistentClient", return_value=mock_client):
+            store = VectorStore(persist_directory=str(temp_dir))
+
+            sentences = [
+                Sentence(
+                    id="doc_sent_0",
+                    document_id="doc1",
+                    page=1,
+                    page_section=1,
+                    sentence_index=0,
+                    text="No citations here.",
+                    citation_numbers=[],
+                    referenced_texts=[],
+                    referenced_bibtex=[],
+                )
+            ]
+            embeddings = [[0.1] * 8]
+
+            store.add_sentences(sentences, embeddings, "doc1")
+
+            kwargs = sentences_collection.upsert.call_args.kwargs
+            metas = kwargs["metadatas"]
+            assert "citation_numbers" not in metas[0]
+            assert "referenced_texts" not in metas[0]
+            assert "referenced_bibtex" not in metas[0]
+
     # --- Test delete_document ---
 
     def test_delete_document_calls_delete_on_collection(self, temp_dir):
@@ -367,3 +442,39 @@ class TestVectorStore:
             store = VectorStore(persist_directory=str(temp_dir))
             assert store.is_document_embedded("doc2") is True
 
+    def test_get_sentences_restores_citation_metadata(self, temp_dir):
+        from zoterorag.vector_store import VectorStore
+
+        mock_client = MagicMock()
+        sentences_collection = MagicMock()
+
+        def get_or_create(name):
+            return sentences_collection
+
+        mock_client.get_or_create_collection.side_effect = get_or_create
+        type(sentences_collection).count = PropertyMock(return_value=0)
+
+        sentences_collection.get.return_value = {
+            "ids": ["doc_sent_0"],
+            "documents": ["This is a sentence [1]."],
+            "metadatas": [
+                {
+                    "document_key": "doc1",
+                    "page": 1,
+                    "page_section": 1,
+                    "sentence_index": 0,
+                    "citation_numbers": [1],
+                    "referenced_texts": ["A. Author. Title. 2020."],
+                    "referenced_bibtex": ["@article{author20201, title={Title}}"],
+                }
+            ],
+        }
+
+        with patch("zoterorag.vector_store.chromadb.PersistentClient", return_value=mock_client):
+            store = VectorStore(persist_directory=str(temp_dir))
+            out = store.get_sentences("doc1")
+
+            assert len(out) == 1
+            assert out[0].citation_numbers == [1]
+            assert out[0].referenced_texts
+            assert out[0].referenced_bibtex

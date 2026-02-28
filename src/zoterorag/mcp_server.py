@@ -9,6 +9,7 @@ from .config import Config
 from .embedding_manager import EmbeddingManager
 from .search_engine import SearchEngine
 from .zotero_client import ZoteroClient
+from .models import CitationReturnMode
 
 
 logger = logging.getLogger(__name__)
@@ -83,19 +84,37 @@ class MCPZoteroServer:
         document_key: Optional[str] = None,
         top_sentences: int = 10,
         min_relevance: float = 0.75,
+        citation_return_mode: CitationReturnMode = "sentence",
+        require_cited_bibtex: bool = False,
     ) -> list[dict]:
-        """Search across embedded documents using two-stage RAG.
-        
-        Returns enriched results including BibTeX and file metadata.
+        """Search across embedded documents.
+
+        Args:
+            citation_return_mode:
+                - "sentence": return sentence only
+                - "bibtex": return only cited BibTeX entries for the matched sentence
+                - "both": return sentence plus cited BibTeX entries
+            require_cited_bibtex:
+                If True, only return results where the matched sentence has at least
+                one cited BibTeX entry attached.
+
+        Returns enriched results including Zotero item BibTeX/file metadata as well as
+        per-sentence citation metadata.
         """
         print(f"[DEBUG] search_documents called with query: {query}")
-        
-        results = self.search_engine.search(
+
+        results = self.search_engine.search_best_sentences(
             query=query,
             document_key=document_key,
             top_sentences=top_sentences,
+            citation_return_mode=citation_return_mode,
         )
-        
+
+        if require_cited_bibtex:
+            before = len(results)
+            results = [r for r in results if getattr(r, "cited_bibtex", None)]
+            print(f"[DEBUG] Filtered require_cited_bibtex: {before} -> {len(results)}")
+
         print(f"[DEBUG] Got {len(results)} search results")
         
         # First pass: collect all unique keys and fetch metadata for each once
@@ -350,7 +369,9 @@ async def search_documents(
     query: str,
     document_key: Optional[str] = None,
     top_sentences: int = 10,
-    min_relevance: float = 0.75,
+    min_relevance: float = 0.7,
+    citation_return_mode: CitationReturnMode = "sentence",
+    require_cited_bibtex: bool = False,
 ) -> list[dict]:
     print(f"[DEBUG] MCP tool search_documents called with query: {query}")
     """Search across embedded documents using two-stage RAG."""
@@ -358,7 +379,9 @@ async def search_documents(
         query=query,
         document_key=document_key,
         top_sentences=top_sentences,
-        min_relevance=min_relevance
+        min_relevance=min_relevance,
+        citation_return_mode=citation_return_mode,
+        require_cited_bibtex=require_cited_bibtex,
     )
 
 

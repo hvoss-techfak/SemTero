@@ -6,7 +6,7 @@ from typing import List, Optional
 import ollama
 
 from .config import Config
-from .models import SearchResult
+from .models import SearchResult, CitationReturnMode
 from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -68,12 +68,24 @@ class SearchEngine:
         top_sections: int = 5,
         top_sentences: int = 10,
         ensure_sentence_embeddings: bool = True,
+        citation_return_mode: CitationReturnMode = "sentence",
     ) -> List[SearchResult]:
         """Return the best matching embedded sentences.
 
         This method is designed to scale to very large sentence collections.
         It relies on the persistent vector index to do the similarity search and
         only pulls back the top-k ids + distances, then fetches just those texts.
+
+        Args:
+            query: Query string
+            document_key: If provided, restrict to this document.
+            top_sections: currently unused in sentence-only mode.
+            top_sentences: we return up to top_sentences sentences.
+            ensure_sentence_embeddings: If True, ensures that sentence embeddings are available.
+            citation_return_mode:
+                - "sentence": return sentence only (current behavior)
+                - "bibtex": return only the referenced BibTeX entries for the matched sentence
+                - "both": return the sentence plus referenced BibTeX entries
         """
         if ensure_sentence_embeddings and not self.config.AUTO_EMBED_SENTENCES:
             # No auto-embedding here; embedding is handled by EmbeddingManager.
@@ -110,14 +122,30 @@ class SearchEngine:
             dist = float(distances[i]) if i < len(distances) else 0.0
             score = 1.0 / (1.0 + max(0.0, dist))
 
+            cited_bibtex = list(meta.get("referenced_bibtex") or [])
+            cited_texts = list(meta.get("referenced_texts") or [])
+            citation_numbers = list(meta.get("citation_numbers") or [])
+
+            # Shape the result text.
+            if citation_return_mode == "bibtex":
+                shaped_text = "\n\n".join([b for b in cited_bibtex if b])
+            elif citation_return_mode == "both":
+                bib = "\n\n".join([b for b in cited_bibtex if b])
+                shaped_text = text if not bib else f"{text}\n\n---\n\n{bib}"
+            else:
+                shaped_text = text
+
             results.append(
                 SearchResult(
-                    text=text,
+                    text=shaped_text,
                     document_title="",
                     section_title="",
                     zotero_key=dk,
                     relevance_score=score,
                     rerank_score=score,
+                    cited_bibtex=cited_bibtex,
+                    cited_reference_texts=cited_texts,
+                    citation_numbers=citation_numbers,
                 )
             )
 

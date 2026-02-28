@@ -183,15 +183,34 @@ class VectorStore:
 
         ids = [s.id for s in sentences]
         documents = [s.text for s in sentences]
-        metadatas = [
-            {
+
+        def _clip_list(v: list, limit: int = 50) -> list:
+            # Keep metadata bounded to avoid bloating the vector DB.
+            return list(v[:limit]) if v else []
+
+        metadatas = []
+        for s in sentences:
+            meta = {
                 "document_key": document_key,
                 "page": int(s.page),
                 "page_section": int(s.page_section) if s.page_section is not None else None,
                 "sentence_index": int(s.sentence_index),
             }
-            for s in sentences
-        ]
+
+            citation_numbers = _clip_list([int(n) for n in (s.citation_numbers or [])])
+            referenced_texts = _clip_list([str(t) for t in (s.referenced_texts or [])], limit=20)
+            referenced_bibtex = _clip_list([str(b) for b in (s.referenced_bibtex or [])], limit=20)
+
+            # Chroma enforces that list metadata values are non-empty once present.
+            # So only include these keys when we actually have values.
+            if citation_numbers:
+                meta["citation_numbers"] = citation_numbers
+            if referenced_texts:
+                meta["referenced_texts"] = referenced_texts
+            if referenced_bibtex:
+                meta["referenced_bibtex"] = referenced_bibtex
+
+            metadatas.append(meta)
 
         self.sentences_collection.upsert(
             ids=ids,
@@ -219,8 +238,24 @@ class VectorStore:
                     sentence_index=int(meta.get("sentence_index", 0)),
                     text=result["documents"][i],
                     is_embedded=True,
+                    citation_numbers=list(meta.get("citation_numbers") or []),
+                    referenced_texts=list(meta.get("referenced_texts") or []),
+                    referenced_bibtex=list(meta.get("referenced_bibtex") or []),
                 )
             )
+        return out
+
+    def get_sentence_metadatas_by_ids(self, ids: List[str]) -> dict[str, dict]:
+        """Fetch sentence metadatas for a small set of ids."""
+        if not ids:
+            return {}
+        res = self.sentences_collection.get(ids=ids, include=["metadatas"])
+        out: dict[str, dict] = {}
+        res_ids = res.get("ids") or []
+        metas = res.get("metadatas") or []
+        for sid, meta in zip(res_ids, metas):
+            if sid:
+                out[str(sid)] = meta or {}
         return out
 
     def search_sentences(

@@ -2,14 +2,11 @@
 
 import sys
 import os
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 # Add src to path like main.py does
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-import pytest
-import ollama
 from zoterorag.search_engine import SearchEngine
 from zoterorag.config import Config
 from zoterorag.models import SearchResult
@@ -72,6 +69,44 @@ class TestSearchBestSentences:
         mock_vs.search_sentence_ids.assert_called_once()
         mock_vs.get_sentence_texts_by_ids.assert_called_once_with(["s1", "s2"])
         assert all(isinstance(r, SearchResult) for r in results)
+
+    @patch('zoterorag.search_engine.ollama.embeddings')
+    def test_search_best_sentences_citation_return_modes(self, mock_ollama_embeddings):
+        mock_ollama_embeddings.return_value = {"embedding": [0.0, 0.0, 1.0]}
+
+        config = Config()
+        engine = SearchEngine(config)
+
+        mock_vs = MagicMock()
+        mock_vs.search_sentence_ids.return_value = (
+            ["s1"],
+            [0.25],
+            [
+                {
+                    "document_key": "docA",
+                    "citation_numbers": [5],
+                    "referenced_texts": ["A. Author. Some Paper. 2020."],
+                    "referenced_bibtex": ["@article{author20205, title={Some Paper}}"],
+                }
+            ],
+        )
+        mock_vs.get_sentence_texts_by_ids.return_value = {"s1": "hello [5]"}
+        engine.vector_store = mock_vs
+
+        # sentence-only
+        r1 = engine.search_best_sentences("q", top_sentences=1, citation_return_mode="sentence")
+        assert r1[0].text == "hello [5]"
+        assert r1[0].citation_numbers == [5]
+        assert r1[0].cited_bibtex
+
+        # bibtex-only
+        r2 = engine.search_best_sentences("q", top_sentences=1, citation_return_mode="bibtex")
+        assert "@article" in r2[0].text
+
+        # both
+        r3 = engine.search_best_sentences("q", top_sentences=1, citation_return_mode="both")
+        assert "hello [5]" in r3[0].text
+        assert "@article" in r3[0].text
 
 
 class TestGetStats:
