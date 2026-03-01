@@ -23,7 +23,12 @@ class PDFProcessor:
     # Regex patterns for markdown headings
     HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
-    def __init__(self, use_layout: bool = True, page_splits: int | None = None):
+    def __init__(
+        self,
+        use_layout: bool = True,
+        page_splits: int | None = None,
+        citation_fuzzy_threshold: float | None = None,
+    ):
         """Initialize PDF processor.
 
         Args:
@@ -31,9 +36,18 @@ class PDFProcessor:
                        page structure analysis (headings, tables, etc.)
             page_splits: Number of parts to split each page into before chunking into sentences
                          (default from config)
+            citation_fuzzy_threshold: Minimum similarity ratio (0.0-1.0) for fuzzy matching
+                                      citations when exact/normalized match fails.
+                                      Defaults to config value.
         """
         self.use_layout = use_layout
         self.page_splits = page_splits if page_splits is not None else config.PAGE_SPLITS
+        self.citation_fuzzy_threshold = (
+            citation_fuzzy_threshold
+            if citation_fuzzy_threshold is not None
+            else config.CITATION_FUZZY_MATCH_THRESHOLD
+        )
+        self.meta_count = 0
 
     def extract_markdown(self, pdf_path: str) -> str:
         """Extract markdown text from PDF using pymupdf4llm."""
@@ -142,180 +156,72 @@ class PDFProcessor:
         lines = [line.rstrip() for line in text.split("\n")]
         return "\n".join(lines)
 
-    def extract_quarter_sections(self, pdf_path: str | Path) -> List[Sentence]:
-        """Backward-compatible alias for `extract_sentences` to avoid breaking existing code."""
-        return self.extract_sentences(pdf_path)
+    def extract_quarter_sections(
+        self, pdf_path: str | Path, document_id: str | None = None
+    ) -> List[Sentence]:
+        """Backward-compatible alias for `extract_sentences` to avoid breaking existing code.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            document_id: Optional override for the document ID used in sentence IDs.
+                        If not provided, derives from filename (pdf_path stem).
+        """
+        return self.extract_sentences(pdf_path, document_id=document_id)
 
-    def extract_sentences(self, pdf_path: str | Path) -> List[Sentence]:
+    def extract_sentences(
+        self, pdf_path: str | Path, document_id: str | None = None
+    ) -> List[Sentence]:
         """Extract per-page sentence chunks.
 
         This keeps the robust page-chunk extraction and page-splitting logic formerly
         used for "sections". The difference is that we now emit a Sentence per
         sentence (the embedding unit), rather than a larger Section/window.
 
+        Args:
+            pdf_path: Path to the PDF file
+            document_id: Optional override for the document ID used in sentence IDs.
+                        If not provided, derives from filename (pdf_path stem).
+                        This is important when using temporary files, as the actual
+                        document key should be used instead of temp filename.
+
         Returns:
             List[Sentence] objects.
         """
         path = Path(pdf_path)
+        
+        # Use provided document_id or derive from filename
+        doc_id = document_id if document_id else path.stem
+        
         if not path.exists():
             return []
 
-        # Best-effort citation extraction. This uses PyMuPDF directly and may produce
-        # slightly different sentence strings compared to pymupdf4llm. We attach
-        # metadata by exact sentence match (best-effort) or by a whitespace-normalized
-        # match fallback.
-        citations_by_sentence: dict[str, object] = {}
-        citations_by_normalized: dict[str, object] = {}
+
         try:
             extracted = extract_citation_metadata(path)
-            citations_by_sentence = extracted
-            citations_by_normalized = {self._normalize_ws(k): v for k, v in extracted.items()}
         except Exception as e:
             logger.debug("Citation extraction failed for %s: %s", path, e)
-
-        try:
-            buf_out = io.StringIO()
-            buf_err = io.StringIO()
-            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
-                md_text = pymupdf4llm.to_markdown(
-                    str(path),
-                    page_chunks=True,
-                    write_images=False,
-                    extract_images=False,
-                )
-        except Exception as e:
-            logger.error("Error extracting from %s: %s", pdf_path, e)
             return []
 
-        if not isinstance(md_text, list):
-            text = str(md_text) if md_text else ""
-            sanitized_text = self.sanitize_markdown(text)
-            return self._sentence_from_text(
-                document_id=path.stem,
-                page=1,
-                page_section=None,
-                text=sanitized_text,
-                citations_by_sentence=citations_by_sentence,
-                citations_by_normalized=citations_by_normalized,
+        out_sentences = []
+        for i,(sentence,metadata) in enumerate(extracted.items()):
+            out = Sentence(
+                id=f"{doc_id}_sent_{i}",
+                document_id=doc_id,
+                page=metadata.page,
+                page_section=0,
+                sentence_index=i,
+                text=sentence,
+                is_embedded=False,
+                citation_numbers=metadata.citation_numbers,
+                referenced_texts=metadata.referenced_texts,
+                referenced_bibtex=metadata.referenced_bibtex,
             )
-
-        out_sentences: List[Sentence] = []
-        sentence_index = 0
-
-        for chunk in md_text:
-            page = int(chunk.get("page", 1))
-            text = chunk.get("text", "")
-
-            lines = [l for l in text.split("\n") if l.strip()]
-            if not lines:
-                continue
-
-            # Combine lines into completed sentences (same logic as before)
-            sentence_lines: list[str] = []
-            current_sentence = ""
-            for line in lines:
-                current_sentence += " " + line.strip()
-                if re.search(r"[.!?]$", line.strip()):
-                    sentence_lines.append(current_sentence.strip())
-                    current_sentence = ""
-            if current_sentence.strip():
-                sentence_lines.append(current_sentence.strip())
-
-            # only keep sentences with more than 3 words (filter out noise)
-            sentence_lines = [s for s in sentence_lines if len(s.split()) > 3]
-            if not sentence_lines:
-                continue
-
-            # Re-split into sentences (defensive)
-            normalized: list[str] = []
-            for line in sentence_lines:
-                split_sentences = re.split(r"(?<=[.!?])\s+", line)
-                normalized.extend([s.strip() for s in split_sentences if s.strip()])
-
-            if not normalized:
-                continue
-
-            all_sentences = normalized
-            all_sentences = [self.sanitize_markdown(s) for s in all_sentences if s.strip()]
-            if not all_sentences:
-                continue
-
-            for sentence in all_sentences:
-                part_sentence = self._sentence_from_text(
-                    document_id=path.stem,
-                    page=page,
-                    page_section=0,
-                    text=sentence,
-                    start_sentence_index=sentence_index,
-                    citations_by_sentence=citations_by_sentence,
-                    citations_by_normalized=citations_by_normalized,
-                )
-                out_sentences.extend(part_sentence)
-                sentence_index += 1
+            out_sentences.append(out)
 
         return out_sentences
 
     def _normalize_ws(self, s: str) -> str:
         return re.sub(r"\s+", " ", (s or "")).strip()
-
-    def _sentence_from_text(
-        self,
-        document_id: str,
-        page: int,
-        page_section: int | None,
-        text: str,
-        start_sentence_index: int = 0,
-        citations_by_sentence: dict[str, object] | None = None,
-        citations_by_normalized: dict[str, object] | None = None,
-    ) -> List[Sentence]:
-        sentence_list = re.split(r"(?<=[.!?])\s+", text)
-        sentence_list = [s.strip() for s in sentence_list if s.strip()]
-
-        out: List[Sentence] = []
-        for i, sent in enumerate(sentence_list):
-            idx = start_sentence_index + i
-
-            citation_numbers: list[int] = []
-            referenced_texts: list[str] = []
-            referenced_bibtex: list[str] = []
-
-            meta = None
-            if citations_by_sentence:
-                meta = citations_by_sentence.get(sent)
-                if meta is None and citations_by_normalized:
-                    meta = citations_by_normalized.get(self._normalize_ws(sent))
-
-            if meta is not None:
-                # citation_extractor.CitationMetadata dataclass
-                citation_numbers = list(getattr(meta, "citation_numbers", []) or [])
-                referenced_texts = list(getattr(meta, "referenced_texts", []) or [])
-                referenced_bibtex = list(getattr(meta, "referenced_bibtex", []) or [])
-            else:
-                # Fallback: parse bracketed numeric citations directly from the sentence.
-                # This handles cases where citation groups appear mid-sentence and/or
-                # the sentence text doesn't exactly match what PyMuPDF extracted.
-                try:
-                    citation_numbers = extract_citation_numbers_from_sentence(sent)
-                except Exception:
-                    citation_numbers = []
-
-            out.append(
-                Sentence(
-                    id=f"{document_id}_sent_{idx}",
-                    document_id=document_id,
-                    page=page,
-                    page_section=page_section,
-                    sentence_index=idx,
-                    text=sent,
-                    is_embedded=False,
-                    citation_numbers=citation_numbers,
-                    referenced_texts=referenced_texts,
-                    referenced_bibtex=referenced_bibtex,
-                )
-            )
-
-        return out
-
 
 def process_document(document: Document) -> List[Sentence]:
     """Process a document to extract sentences."""

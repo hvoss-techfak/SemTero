@@ -9,18 +9,20 @@ The main entrypoint for integration is :func:`extract_citation_metadata`, which
 returns a mapping of sentence text -> resolved citation metadata. The rest of the
 app stores these fields alongside sentence embeddings.
 
-This module is deliberately independent from the rest of the pipeline so it's
-unit-testable and can be reused from :class:`zoterorag.pdf_processor.PDFProcessor`.
+This module uses pymupdf4llm to extract text consistently with pdf_processor.py,
+ensuring that sentence boundaries match when attaching citations.
 """
 
 from __future__ import annotations
 
+import io
+import contextlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import fitz  # PyMuPDF
+import pymupdf4llm
 
 _CITATION_GROUP_RE = re.compile(r"\[(?P<body>[^]]{1,80})]")
 _CITATION_BODY_OK_RE = re.compile(
@@ -64,75 +66,62 @@ def extract_citation_numbers_from_sentence(sentence: str) -> list[int]:
     return sorted(numbers)
 
 
-def extract_page_lines(doc: fitz.Document, page_index: int) -> list[str]:
-    """Extract lines in a stable reading order (handles two columns reasonably)."""
-
-    page = doc.load_page(page_index)
-    words = page.get_text("words")
-    if not words:
+def extract_page_text_from_pymupdf4llm(pdf_path: str | Path) -> list[dict]:
+    """Extract page text using pymupdf4llm for consistent extraction.
+    
+    Returns a list of dicts with 'page' (1-based) and 'text' keys.
+    This matches the format used by pdf_processor.py.
+    """
+    path = Path(pdf_path)
+    if not path.exists():
+        return []
+    
+    try:
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            md_text = pymupdf4llm.to_markdown(
+                str(path),
+                page_chunks=True,
+                write_images=False,
+                extract_images=False,
+            )
+        
+        if isinstance(md_text, list):
+            return [{"page": chunk.get("page", 1), "text": chunk.get("text", "")} for chunk in md_text]
+        elif md_text:
+            return [{"page": 1, "text": str(md_text)}]
+        return []
+    except Exception:
         return []
 
-    width = page.rect.width
-    mid_x = width * 0.5
-    left = [w for w in words if w[0] < mid_x]
-    right = [w for w in words if w[0] >= mid_x]
 
-    def lines_from(words_subset: list[tuple]) -> list[tuple[float, float, str]]:
-        grouped: dict[tuple[int, int], list[tuple]] = {}
-        for w in words_subset:
-            key = (int(w[5]), int(w[6]))
-            grouped.setdefault(key, []).append(w)
-
-        lines: list[tuple[float, float, str]] = []
-        for ws in grouped.values():
-            ws_sorted = sorted(ws, key=lambda x: x[0])
-            text = " ".join(w[4] for w in ws_sorted)
-            y0 = min(w[1] for w in ws_sorted)
-            x0 = min(w[0] for w in ws_sorted)
-            lines.append((y0, x0, text))
-        return lines
-
-    if len(right) < 0.2 * len(left):
-        all_lines = lines_from(words)
-        all_lines.sort(key=lambda t: (t[0], t[1]))
-        return [_normalize_ws(txt) for _, _, txt in all_lines if _normalize_ws(txt)]
-
-    left_lines = lines_from(left)
-    right_lines = lines_from(right)
-    left_lines.sort(key=lambda t: (t[0], t[1]))
-    right_lines.sort(key=lambda t: (t[0], t[1]))
-
-    merged = [(0, float(y0), float(x0), str(txt)) for (y0, x0, txt) in left_lines] + [
-        (1, float(y0), float(x0), str(txt)) for (y0, x0, txt) in right_lines
-    ]
-    merged.sort(key=lambda t: (t[0], t[1], t[2]))
-
-    return [_normalize_ws(txt) for _col, _y0, _x0, txt in merged if _normalize_ws(txt)]
-
-
-def find_references_start_page(doc: fitz.Document) -> int:
+def find_references_start_page(pages: list[dict]) -> int:
     """Return 0-based page index for the start of references section."""
-
+    
     heading_re = re.compile(r"^\s*References\s*$", re.I | re.M)
-    for i in range(doc.page_count):
-        text = doc.load_page(i).get_text("text")
+    
+    for i, chunk in enumerate(pages):
+        text = chunk.get("text", "")
         if heading_re.search(text):
             return i
 
     refstart_re = re.compile(r"^\s*\[(\d{1,4})]\s+", re.M)
-    for i in range(max(0, doc.page_count - 8), doc.page_count):
-        text = doc.load_page(i).get_text("text")
+    # Check last 8 pages for reference-like numbering
+    start_check = max(0, len(pages) - 8)
+    for i in range(start_check, len(pages)):
+        text = pages[i].get("text", "")
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         starts = sum(1 for ln in lines if refstart_re.match(ln))
         if lines and starts / len(lines) > 0.25:
             return i
 
-    return max(0, doc.page_count - 1)
+    return max(0, len(pages) - 1)
 
 
-def parse_references(doc: fitz.Document, start_page: int) -> dict[int, str]:
+def parse_references_from_pages(pages: list[dict], start_page_idx: int) -> dict[int, str]:
     """Parse references of the form '[12] ...' into a mapping."""
-
+    
     ref_line_re = re.compile(r"^\s*\[(\d{1,4})]\s+(.*)$")
 
     entries: dict[int, str] = {}
@@ -148,8 +137,8 @@ def parse_references(doc: fitz.Document, start_page: int) -> dict[int, str]:
         cur_n = None
         cur_text = ""
 
-    for p in range(start_page, doc.page_count):
-        page_text = doc.load_page(p).get_text("text")
+    for i in range(start_page_idx, len(pages)):
+        page_text = pages[i].get("text", "")
         for raw_line in page_text.splitlines():
             line = _normalize_ws(raw_line)
             if not line:
@@ -306,6 +295,7 @@ def reference_text_to_bibtex(ref_text: str, number: Optional[int] = None) -> Opt
 
 @dataclass(frozen=True)
 class CitationMetadata:
+    page: int
     citation_numbers: list[int]
     referenced_texts: list[str]
     referenced_bibtex: list[str]
@@ -314,34 +304,48 @@ class CitationMetadata:
 def extract_citation_metadata(pdf_path: str | Path) -> dict[str, CitationMetadata]:
     """Extract citation metadata keyed by *exact* sentence text.
 
-    We purposely key by sentence text because our current PDF pipeline produces
-    sentence text from a different extractor (pymupdf4llm). Exact matches won't
-    always succeed; the caller should treat this as best-effort.
+    Uses pymupdf4llm for consistent text extraction with pdf_processor.py.
+    This ensures sentence boundaries match when attaching citations.
     """
+    
+    # Use pymupdf4llm to extract pages consistently
+    pages = extract_page_text_from_pymupdf4llm(pdf_path)
+    if not pages:
+        return {}
 
-    doc = fitz.open(str(pdf_path))
-    ref_start = find_references_start_page(doc)
-    refs = parse_references(doc, ref_start)
+    ref_start_idx = find_references_start_page(pages)
+    refs = parse_references_from_pages(pages, ref_start_idx)
     refs_bibtex: dict[int, Optional[str]] = {n: reference_text_to_bibtex(t, number=n) for n, t in refs.items()}
 
+    # Use same splitter as pdf_processor.py for consistent sentence boundaries
     splitter = re.compile(r"(?<=[.!?])\s+(?=[\"\[(]?[A-Z0-9])")
 
     sentence_map: dict[str, CitationMetadata] = {}
-    for p in range(0, max(0, ref_start)):
-        lines = extract_page_lines(doc, p)
-        if not lines:
-            continue
-        filtered = [ln for ln in lines if not (ln.isdigit() and len(ln) <= 3)]
-        text = _normalize_ws(" ".join(filtered))
+    
+    # Process pages before the references section
+    for i in range(0, max(0, ref_start_idx)):
+        chunk = pages[i]
+        text = chunk.get("text", "")
+        
         if not text:
             continue
-        for sent in splitter.split(text):
+            
+        # Split into lines and filter out standalone page numbers
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        filtered = [ln for ln in lines if not (ln.isdigit() and len(ln) <= 3)]
+
+        combined_text = _normalize_ws(" ".join(filtered))
+        if not combined_text:
+            continue
+            
+        # Split into sentences using the same pattern as pdf_processor.py
+        for sent in splitter.split(combined_text):
             s = _normalize_ws(sent)
-            if not s:
+
+            if not s or len(s.split()) <= 3:  # Skip short sentences like in pdf_processor
                 continue
+                
             nums = extract_citation_numbers_from_sentence(s)
-            if not nums:
-                continue
 
             referenced_texts: list[str] = []
             referenced_bibtex: list[str] = []
@@ -351,8 +355,8 @@ def extract_citation_metadata(pdf_path: str | Path) -> dict[str, CitationMetadat
                     b = refs_bibtex.get(n)
                     if b:
                         referenced_bibtex.append(b)
-
             sentence_map[s] = CitationMetadata(
+                page=chunk.get("page", 1),
                 citation_numbers=nums,
                 referenced_texts=referenced_texts,
                 referenced_bibtex=referenced_bibtex,

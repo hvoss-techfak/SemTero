@@ -171,8 +171,9 @@ class EmbeddingManager:
         document: Document,
         pdf_path: str,
     ) -> List[Sentence]:
-        """Extract sentences from PDF."""
-        return self.pdf_processor.extract_quarter_sections(pdf_path)
+        return self.pdf_processor.extract_sentences(
+            pdf_path, document_id=document.zotero_key
+        )
 
     # --- Background operations ---
 
