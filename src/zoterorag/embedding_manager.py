@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import random
 import tempfile
 import threading
 import time
@@ -19,6 +20,7 @@ from zoterorag.pdf_processor import PDFProcessor
 from zoterorag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class EmbeddingManager:
@@ -103,7 +105,7 @@ class EmbeddingManager:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def _embed_text(self, texts: List[str]) -> List[List[float]]:
-        print(f"Embedding single text (batch size 1): {texts[0][:60]}...")
+        logger.debug(f"Embedding single text (batch size 1): {texts[0][:60]}...")
         response = ollama.embeddings(
             model=self.config.EMBEDDING_MODEL,
             prompt=texts[0],
@@ -147,7 +149,8 @@ class EmbeddingManager:
                 normalized.append(str(t))
 
         batch_size = getattr(self.config, "BATCH_EMBEDDING_SIZE", 32)
-        print(f"Embedding batch of {len(normalized)} texts with batch size {batch_size}...")
+        logger.info(f"Embedding batch of {len(normalized)} texts with batch size {batch_size}...")
+        logger.debug("Sample text for embedding: %s", random.choice(normalized) + "..." if normalized else "No texts")
         all_embeddings: List[List[float]] = []
 
         for i in range(0, len(normalized), batch_size):

@@ -189,7 +189,7 @@ class PDFProcessor:
         if not isinstance(md_text, list):
             text = str(md_text) if md_text else ""
             sanitized_text = self.sanitize_markdown(text)
-            return self._sentences_from_text(
+            return self._sentence_from_text(
                 document_id=path.stem,
                 page=1,
                 page_section=None,
@@ -198,7 +198,7 @@ class PDFProcessor:
                 citations_by_normalized=citations_by_normalized,
             )
 
-        sentences: List[Sentence] = []
+        out_sentences: List[Sentence] = []
         sentence_index = 0
 
         for chunk in md_text:
@@ -234,42 +234,31 @@ class PDFProcessor:
             if not normalized:
                 continue
 
-            num_splits = max(1, int(self.page_splits))
-            lines_per_split = max(1, len(normalized) // num_splits)
+            all_sentences = normalized
+            all_sentences = [self.sanitize_markdown(s) for s in all_sentences if s.strip()]
+            if not all_sentences:
+                continue
 
-            for i in range(num_splits):
-                start_idx = i * lines_per_split
-                end_idx = min((i + 1) * lines_per_split, len(normalized))
-                if i == num_splits - 1:
-                    end_idx = len(normalized)
-
-                part_lines = normalized[start_idx:end_idx]
-                if not part_lines:
-                    continue
-
-                part_text = " ".join(part_lines)
-                sanitized = self.sanitize_markdown(part_text)
-                if not sanitized.strip():
-                    continue
-
-                part_sentences = self._sentences_from_text(
+            for sentence in all_sentences:
+                print(sentence)
+                part_sentence = self._sentence_from_text(
                     document_id=path.stem,
                     page=page,
-                    page_section=i + 1,
-                    text=sanitized,
+                    page_section=0,
+                    text=sentence,
                     start_sentence_index=sentence_index,
                     citations_by_sentence=citations_by_sentence,
                     citations_by_normalized=citations_by_normalized,
                 )
-                sentences.extend(part_sentences)
-                sentence_index += len(part_sentences)
+                out_sentences.extend(part_sentence)
+                sentence_index += 1
 
-        return sentences
+        return out_sentences
 
     def _normalize_ws(self, s: str) -> str:
         return re.sub(r"\s+", " ", (s or "")).strip()
 
-    def _sentences_from_text(
+    def _sentence_from_text(
         self,
         document_id: str,
         page: int,
