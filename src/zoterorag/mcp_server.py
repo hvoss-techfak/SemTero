@@ -143,6 +143,10 @@ class MCPZoteroServer:
                 logger.debug(
                     f"Filtering out result with relevance {r.relevance_score} below threshold {min_relevance}, sentence: {r.text[:150]}...")
 
+        if len(ret) == 0:
+            logger.debug("No results above relevance threshold")
+            return []
+
         # Do reranking
         results = self.do_reranking(ret, query)
 
@@ -420,10 +424,34 @@ async def search_documents(
     query: str,
     document_key: Optional[str] = None,
     top_sentences: int = 10,
-    min_relevance: float = 0.7,
+    min_relevance: float = 0.75,
     citation_return_mode: CitationReturnMode = "sentence",
     require_cited_bibtex: bool = False,
 ) -> list[dict]:
+    """
+    Search Zotero for relevant sentences matching the query, with enriched metadata and optional citation info.
+    :param query: The search query string.
+    :param document_key: Optional - Zotero document key to restrict the search to a specific document.
+    :param top_sentences: The maximum number of sentences to return.
+    :param min_relevance: Minimum relevance score (0 to 1) for returned sentences. Keep this to at least 0.75 to ensure quality.
+    :param citation_return_mode: Determines how to return citation info for matched sentences:
+        - "sentence": return the matched sentence text only (default)
+        - "bibtex": return only the BibTeX entries for citations attached to the matched sentence
+        - "both": return both the matched sentence and its attached BibTeX entries
+    :param require_cited_bibtex: If True, only return sentences that have at least one cited BibTeX entry attached. This can be used to filter for higher-quality results that have explicit citations.
+    :return: A list of dictionaries, each containing:
+        - text: The matched sentence text
+        - document_title: The title of the document containing the sentence
+        - section_title: The title of the section containing the sentence (if available)
+        - zotero_key: The Zotero key of the document containing the sentence
+        - relevance_score: The relevance score of the sentence to the query (0 to 1)
+        - cited_bibtex: A list of BibTeX entries for citations attached to the sentence (if citation_return_mode is "bibtex" or "both")
+        - bibtex: The BibTeX entry for the document (if available)
+        - file_path: The file path to the document's PDF (if available)
+        - authors: A list of authors for the document (if available)
+        - date: The publication date of the document (if available)
+        - item_type: The Zotero item type (e.g. "book", "article") (if available)
+    """
     logger.debug(f"MCP tool search_documents called with query: {query}")
     """Search across embedded documents using two-stage RAG."""
     return await get_server().search_documents(
@@ -435,41 +463,41 @@ async def search_documents(
         require_cited_bibtex=require_cited_bibtex,
     )
 
-
-@mcp.tool
-async def get_library_items(limit: int = 25) -> list[dict]:
-    """Get items from Zotero library."""
-    return await get_server().get_library_items(limit=limit)
-
-
-@mcp.tool
-async def get_documents_with_pdfs() -> list[dict]:
-    """Get all documents that have PDFs."""
-    return await get_server().get_documents_with_pdfs()
-
-
-@mcp.tool
-async def sync_and_embed(embed_sentences: bool = False, document_key: Optional[str] = None) -> dict:
-    """Sync from Zotero and optionally embed new documents."""
-    return await get_server().sync_and_embed(embed_sentences=embed_sentences, document_key=document_key)
-
-
-@mcp.tool
-async def get_embedding_status() -> dict:
-    """Get current embedding statistics."""
-    return await get_server().get_embedding_status()
-
-
-@mcp.tool
-async def delete_document(document_key: str) -> dict:
-    """Delete all embeddings for a document."""
-    return await get_server().delete_document(document_key)
-
-
-@mcp.tool
-async def reembed_document(document_key: str) -> dict:
-    """Re-embed a specific document."""
-    return await get_server().reembed_document(document_key)
+#
+# @mcp.tool
+# async def get_library_items(limit: int = 25) -> list[dict]:
+#     """Get items from Zotero library."""
+#     return await get_server().get_library_items(limit=limit)
+#
+#
+# @mcp.tool
+# async def get_documents_with_pdfs() -> list[dict]:
+#     """Get all documents that have PDFs."""
+#     return await get_server().get_documents_with_pdfs()
+#
+#
+# @mcp.tool
+# async def sync_and_embed(embed_sentences: bool = False, document_key: Optional[str] = None) -> dict:
+#     """Sync from Zotero and optionally embed new documents."""
+#     return await get_server().sync_and_embed(embed_sentences=embed_sentences, document_key=document_key)
+#
+#
+# @mcp.tool
+# async def get_embedding_status() -> dict:
+#     """Get current embedding statistics."""
+#     return await get_server().get_embedding_status()
+#
+#
+# @mcp.tool
+# async def delete_document(document_key: str) -> dict:
+#     """Delete all embeddings for a document."""
+#     return await get_server().delete_document(document_key)
+#
+#
+# @mcp.tool
+# async def reembed_document(document_key: str) -> dict:
+#     """Re-embed a specific document."""
+#     return await get_server().reembed_document(document_key)
 
 
 @mcp.tool

@@ -119,10 +119,7 @@ class SearchEngine:
             meta = (metadatas[i] if i < len(metadatas) else None) or {}
             dk = str(meta.get("document_key", ""))
 
-            # Chroma returns a distance, where smaller == better. Convert to a monotonic
-            # score where larger == better to fit existing SearchResult sorting.
-            dist = float(distances[i]) if i < len(distances) else 0.0
-            score = 1.0 / (1.0 + max(0.0, dist))
+            score = distances[i]
 
             cited_bibtex = list(meta.get("referenced_bibtex") or [])
             cited_texts = list(meta.get("referenced_texts") or [])

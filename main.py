@@ -35,6 +35,13 @@ from zoterorag.vector_store import VectorStore
 from zoterorag.zotero_client import ZoteroClient
 from zoterorag.logging_setup import setup_logging
 
+# Import web UI app
+try:
+    from webui.app import run as run_webui
+    WEBUI_AVAILABLE = True
+except ImportError:
+    WEBUI_AVAILABLE = False
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -224,6 +231,23 @@ class ZoteroRAGApplication:
                 status.is_running,
             )
 
+    def _start_webui(self, port: int = 23121):
+        """Start the web UI in a separate thread."""
+        if not WEBUI_AVAILABLE:
+            logger.warning("Web UI not available. Install Flask.")
+            return
+        
+        try:
+            webui_thread = threading.Thread(
+                target=run_webui,
+                kwargs={'host': '127.0.0.1', 'port': port, 'debug': False},
+                daemon=True
+            )
+            webui_thread.start()
+            logger.info(f"Web UI started on http://127.0.0.1:{port}")
+        except Exception as e:
+            logger.error(f"Failed to start web UI: {e}")
+
     def run_mcp_server(self):
         """Run the MCP server (blocking)."""
         # Initialize if not already done
@@ -248,6 +272,9 @@ class ZoteroRAGApplication:
         
         # Start background embedding automatically after initialization
         self.start_background_embedding()
+        
+        # Start web UI in a separate thread
+        self._start_webui()
         
         try:
             # Use mcp.run() directly - it handles its own event loop
@@ -385,6 +412,17 @@ def main():
         default=23120,
         help="Port for HTTP/SSE transports (default: 23120)"
     )
+    parser.add_argument(
+        "--no-webui",
+        action="store_true",
+        help="Disable the web UI (default: enabled)"
+    )
+    parser.add_argument(
+        "--webui-port",
+        type=int,
+        default=23121,
+        help="Port for Web UI (default: 23121)"
+    )
     args = parser.parse_args()
 
     app = ZoteroRAGApplication()
@@ -428,9 +466,8 @@ def main():
     # Handle transport selection
     if args.transport != "stdio":
         # Run with HTTP/SSE/streamable-http transport
-        import anyio
         
-        # Initialize services first
+        # Initialize services first (needed for web UI to work)
         if not app.initialize():
             sys.exit(1)
         
@@ -449,10 +486,15 @@ def main():
         # Start background embedding automatically
         app.start_background_embedding()
         
+        # Start web UI in a separate thread (unless disabled)
+        if not args.no_webui:
+            app._start_webui(args.webui_port)
+        
         # Run the server with specified transport
         logger.info(f"MCP server starting with {args.transport} transport on port {args.port}...")
         
         try:
+            import anyio
             if args.transport == "sse":
                 mcp.run(transport="sse", host="127.0.0.1", port=args.port)
             elif args.transport == "http":
@@ -460,10 +502,13 @@ def main():
             elif args.transport == "streamable-http":
                 mcp.run(transport="streamable-http", host="127.0.0.1", port=args.port)
         except KeyboardInterrupt:
-            pass
-        finally:
+            logger.info("Shutting down...")
             app.shutdown()
     else:
+        # Check web UI availability
+        if not WEBUI_AVAILABLE and not args.no_webui:
+            logger.warning("Web UI not available. Install Flask: uv add flask")
+
         try:
             if args.daemon:
                 app.run_daemon()
@@ -476,4 +521,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

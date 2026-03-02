@@ -84,14 +84,17 @@ class VectorStore:
 
     def _get_or_create_collection(self, name: str):
         """Get or create a collection (compatible with older tests/client mocks)."""
+        # Use cosine similarity for the distance metric
+        collection_metadata = {"hnsw:space": "cosine"}
+
         # Some tests mock `get_or_create_collection`, others mock `get_collection/create_collection`.
         if hasattr(self.client, "get_or_create_collection"):
-            return self.client.get_or_create_collection(name)
+            return self.client.get_or_create_collection(name, metadata=collection_metadata)
 
         try:
             return self.client.get_collection(name)
         except Exception:
-            return self.client.create_collection(name)
+            return self.client.create_collection(name, metadata=collection_metadata)
 
     # --- Document metadata tracking ---
 
