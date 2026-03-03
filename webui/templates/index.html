@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZoteroRAG Search</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔍 ZoteroRAG Search</h1>
+            <p class="subtitle">Search through your embedded Zotero documents</p>
+        </header>
+
+        <main>
+            <section class="search-section">
+                <form id="search-form">
+                    <div class="search-input-wrapper">
+                        <input 
+                            type="text" 
+                            id="query-input" 
+                            name="query" 
+                            placeholder="Enter your search query..." 
+                            required
+                            autocomplete="off"
+                        >
+                        <button type="submit" id="search-button">
+                            Search
+                        </button>
+                    </div>
+                    
+                    <div class="options">
+                        <label>
+                            Max Results:
+                            <input type="number" id="top-sentences" value="10" min="1" max="50">
+                        </label>
+                        <label>
+                            Min Relevance:
+                            <input type="range" id="min-relevance" min="0.5" max="1.0" step="0.05" value="0.75">
+                            <span id="relevance-value">0.75</span>
+                        </label>
+                    </div>
+                </form>
+                
+                <div id="loading" class="hidden">
+                    <div class="spinner"></div>
+                    <p>Searching...</p>
+                </div>
+            </section>
+
+            <section id="results-section" class="hidden">
+                <div class="results-header">
+                    <h2>Results</h2>
+                    <span id="result-count"></span>
+                </div>
+                
+                <div id="results-container">
+                    <!-- Results will be inserted here -->
+                </div>
+            </section>
+
+            <section id="error-section" class="hidden">
+                <div class="error-message">
+                    <p id="error-text"></p>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>ZoteroRAG - Powered by Ollama embeddings</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
