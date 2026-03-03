@@ -89,7 +89,7 @@ class Config:
         self.MAX_EMBEDDING_WORKERS = workers
 
         # Batch embedding settings
-        self.BATCH_EMBEDDING_SIZE: int = _get_int("BATCH_EMBEDDING_SIZE", 128)
+        self.BATCH_EMBEDDING_SIZE: int = _get_int("BATCH_EMBEDDING_SIZE", 32)
 
         # Batch size for vector store upserts (ChromaDB has internal limits)
         self.BATCH_VECTOR_STORE_SIZE: int = _get_int("BATCH_VECTOR_STORE_SIZE", 5000)
