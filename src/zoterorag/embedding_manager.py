@@ -149,7 +149,7 @@ class EmbeddingManager:
                 normalized.append(str(t))
 
         batch_size = getattr(self.config, "BATCH_EMBEDDING_SIZE", 32)
-        logger.info(f"Embedding batch of {len(normalized)} texts with batch size {batch_size}...")
+        logger.info(f"Embedding batch of {len(normalized)} texts with batch size {batch_size} and embedding dimensions {self.config.EMBEDDING_DIMENSIONS}")
         logger.debug("Sample text for embedding: %s", random.choice(normalized) + "..." if normalized else "No texts")
         all_embeddings: List[List[float]] = []
 

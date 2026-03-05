@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import traceback
 from pathlib import Path
 from typing import Optional, List, Any
 
@@ -12,13 +13,14 @@ import lancedb
 from .models import Sentence
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed internal state logs
 
 
 class VectorStore:
     """LanceDB wrapper for storing and retrieving sentence embeddings."""
 
     _TABLE_NAME = "sentences"
-    _SUPPORTED_INDEX_TYPES = {"IVF_FLAT", "HNSW"}
+    _SUPPORTED_INDEX_TYPES = {"IVF_HNSW_SQ","IVF_RQ","IVF_PQ"}
 
     def __init__(self, persist_directory: str = "./data/vector_store"):
         self.persist_directory = Path(persist_directory)
@@ -38,6 +40,7 @@ class VectorStore:
 
         self._detected_sentence_dim: int | None = None
         self._detect_dimensions()
+
 
     def _open_table_if_exists(self):
         try:
@@ -59,7 +62,7 @@ class VectorStore:
         return f"{column} IN ({escaped})"
 
     def _resolve_index_type(self) -> str:
-        configured = os.getenv("LANCEDB_INDEX_TYPE", "HNSW")
+        configured = os.getenv("LANCEDB_INDEX_TYPE", "IVF_HNSW_SQ")
         index_type = str(configured).strip().upper()
         if index_type not in self._SUPPORTED_INDEX_TYPES:
             logger.warning(
@@ -72,35 +75,29 @@ class VectorStore:
 
     def _ensure_cosine_index(self) -> None:
         if not self.sentences_table or self._index_ready:
-            return
+            try:
+                self.sentences_table.optimize()
+            except Exception as e:
+                logger.debug("Could not optimize LanceDB table: %s", e)
         try:
+            #check if there is already an index on the vector column
+            existing_indexes = self.sentences_table.list_indices()
+            for idx in existing_indexes:
+                if "vector" in idx.columns and idx.name == "vector_idx":
+                    self._index_ready = True
+                    return
+
             self.sentences_table.create_index(
                 metric="cosine",
                 vector_column_name="vector",
-                replace=True,
+                replace=False,
                 index_type=self._index_type,
             )
             self._index_ready = True
         except Exception as e:
-            if self._index_type != "IVF_FLAT":
-                logger.warning(
-                    "Could not create LanceDB %s index (%s). Falling back to IVF_FLAT.",
-                    self._index_type,
-                    e,
-                )
-                try:
-                    self.sentences_table.create_index(
-                        metric="cosine",
-                        vector_column_name="vector",
-                        replace=True,
-                        index_type="IVF_FLAT",
-                    )
-                    self._index_ready = True
-                except Exception as fallback_error:
-                    logger.debug("Could not create LanceDB cosine index yet: %s", fallback_error)
-            else:
-                # Keep writes resilient even if index creation is temporarily unavailable.
-                logger.debug("Could not create LanceDB cosine index yet: %s", e)
+            logger.debug("Could not create LanceDB cosine index yet: %s", e)
+            logger.debug("Probably the table is not ready; it will be retried on next add/search.")
+
 
     def _detect_dimensions(self):
         """Detect embedding dimensions from existing table rows."""
@@ -289,8 +286,7 @@ class VectorStore:
                         logger.debug("Could not delete existing ids before add")
                     self.sentences_table.add(rows)
 
-                self._index_ready = False
-                self._ensure_cosine_index()
+        self._ensure_cosine_index()
 
     def get_sentences(self, document_key: str) -> List[Sentence]:
         if not self.sentences_table:
@@ -412,6 +408,7 @@ class VectorStore:
         if not self.sentences_table:
             return [], [], []
 
+        self._ensure_cosine_index()
         try:
             builder: Any = self.sentences_table.search([float(x) for x in query_embedding])
             builder = builder.metric("cosine")
@@ -448,7 +445,7 @@ class VectorStore:
                 continue
 
             distance = float(row.get("_distance", 1.0))
-            score = max(-1.0, min(1.0, 1.0 - distance))
+            score = 1.0 - (distance/2)  # Convert cosine distance to similarity score
 
             meta = {
                 "document_key": row.get("document_key"),

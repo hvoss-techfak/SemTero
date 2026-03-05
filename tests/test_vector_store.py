@@ -205,20 +205,3 @@ class TestVectorStore:
         monkeypatch.setenv("LANCEDB_INDEX_TYPE", "banana")
         store = VectorStore(persist_directory=str(temp_dir))
         assert store._index_type == "IVF_FLAT"
-
-    def test_hnsw_failure_falls_back_to_ivf_flat(self, temp_dir, monkeypatch):
-        monkeypatch.setenv("LANCEDB_INDEX_TYPE", "HNSW")
-        store = VectorStore(persist_directory=str(temp_dir))
-
-        mocked_table = Mock()
-        mocked_table.create_index.side_effect = [RuntimeError("no hnsw"), None]
-        store.sentences_table = mocked_table
-
-        store._ensure_cosine_index()
-
-        assert mocked_table.create_index.call_count == 2
-        first_call = mocked_table.create_index.call_args_list[0].kwargs
-        second_call = mocked_table.create_index.call_args_list[1].kwargs
-        assert first_call["index_type"] == "HNSW"
-        assert second_call["index_type"] == "IVF_FLAT"
-        assert store._index_ready is True

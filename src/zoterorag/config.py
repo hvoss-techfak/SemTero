@@ -65,7 +65,7 @@ class Config:
 
         # Ollama settings
         self.OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:4b")
+        self.EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
         self.RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "dengcao/Qwen3-Reranker-0.6B:Q8_0")
 
         # Embedding dimensions: 0 means auto-detect from model
@@ -89,7 +89,7 @@ class Config:
         self.MAX_EMBEDDING_WORKERS = workers
 
         # Batch embedding settings
-        self.BATCH_EMBEDDING_SIZE: int = _get_int("BATCH_EMBEDDING_SIZE", 32)
+        self.BATCH_EMBEDDING_SIZE: int = _get_int("BATCH_EMBEDDING_SIZE", 256)
 
         # Batch size for vector store write operations.
         self.BATCH_VECTOR_STORE_SIZE: int = _get_int("BATCH_VECTOR_STORE_SIZE", 5000)
