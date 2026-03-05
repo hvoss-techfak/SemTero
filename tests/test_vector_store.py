@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from unittest.mock import Mock
 
 # Add src to path like main.py does
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -190,3 +191,34 @@ class TestVectorStore:
     def test_get_document_title_compatibility(self, vector_store):
         assert vector_store.get_document_title("doc1") is None
 
+    def test_index_type_defaults_to_hnsw(self, temp_dir, monkeypatch):
+        monkeypatch.delenv("LANCEDB_INDEX_TYPE", raising=False)
+        store = VectorStore(persist_directory=str(temp_dir))
+        assert store._index_type == "HNSW"
+
+    def test_index_type_reads_env_case_insensitive(self, temp_dir, monkeypatch):
+        monkeypatch.setenv("LANCEDB_INDEX_TYPE", "ivf_flat")
+        store = VectorStore(persist_directory=str(temp_dir))
+        assert store._index_type == "IVF_FLAT"
+
+    def test_invalid_index_type_falls_back_to_ivf_flat(self, temp_dir, monkeypatch):
+        monkeypatch.setenv("LANCEDB_INDEX_TYPE", "banana")
+        store = VectorStore(persist_directory=str(temp_dir))
+        assert store._index_type == "IVF_FLAT"
+
+    def test_hnsw_failure_falls_back_to_ivf_flat(self, temp_dir, monkeypatch):
+        monkeypatch.setenv("LANCEDB_INDEX_TYPE", "HNSW")
+        store = VectorStore(persist_directory=str(temp_dir))
+
+        mocked_table = Mock()
+        mocked_table.create_index.side_effect = [RuntimeError("no hnsw"), None]
+        store.sentences_table = mocked_table
+
+        store._ensure_cosine_index()
+
+        assert mocked_table.create_index.call_count == 2
+        first_call = mocked_table.create_index.call_args_list[0].kwargs
+        second_call = mocked_table.create_index.call_args_list[1].kwargs
+        assert first_call["index_type"] == "HNSW"
+        assert second_call["index_type"] == "IVF_FLAT"
+        assert store._index_ready is True

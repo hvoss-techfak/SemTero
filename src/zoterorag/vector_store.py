@@ -18,6 +18,7 @@ class VectorStore:
     """LanceDB wrapper for storing and retrieving sentence embeddings."""
 
     _TABLE_NAME = "sentences"
+    _SUPPORTED_INDEX_TYPES = {"IVF_FLAT", "HNSW"}
 
     def __init__(self, persist_directory: str = "./data/vector_store"):
         self.persist_directory = Path(persist_directory)
@@ -33,6 +34,7 @@ class VectorStore:
 
         self.sentences_table = self._open_table_if_exists()
         self._index_ready = False
+        self._index_type = self._resolve_index_type()
 
         self._detected_sentence_dim: int | None = None
         self._detect_dimensions()
@@ -56,6 +58,18 @@ class VectorStore:
         escaped = ", ".join(f"'{cls._sql_quote(v)}'" for v in values)
         return f"{column} IN ({escaped})"
 
+    def _resolve_index_type(self) -> str:
+        configured = os.getenv("LANCEDB_INDEX_TYPE", "HNSW")
+        index_type = str(configured).strip().upper()
+        if index_type not in self._SUPPORTED_INDEX_TYPES:
+            logger.warning(
+                "Unsupported LANCEDB_INDEX_TYPE=%r. Falling back to IVF_FLAT.",
+                configured,
+            )
+            return "IVF_FLAT"
+        logger.info("Using LanceDB index type: %s", index_type)
+        return index_type
+
     def _ensure_cosine_index(self) -> None:
         if not self.sentences_table or self._index_ready:
             return
@@ -64,12 +78,29 @@ class VectorStore:
                 metric="cosine",
                 vector_column_name="vector",
                 replace=True,
-                index_type="IVF_FLAT",
+                index_type=self._index_type,
             )
             self._index_ready = True
         except Exception as e:
-            # Keep writes resilient even if index creation is temporarily unavailable.
-            logger.debug("Could not create LanceDB cosine index yet: %s", e)
+            if self._index_type != "IVF_FLAT":
+                logger.warning(
+                    "Could not create LanceDB %s index (%s). Falling back to IVF_FLAT.",
+                    self._index_type,
+                    e,
+                )
+                try:
+                    self.sentences_table.create_index(
+                        metric="cosine",
+                        vector_column_name="vector",
+                        replace=True,
+                        index_type="IVF_FLAT",
+                    )
+                    self._index_ready = True
+                except Exception as fallback_error:
+                    logger.debug("Could not create LanceDB cosine index yet: %s", fallback_error)
+            else:
+                # Keep writes resilient even if index creation is temporarily unavailable.
+                logger.debug("Could not create LanceDB cosine index yet: %s", e)
 
     def _detect_dimensions(self):
         """Detect embedding dimensions from existing table rows."""
