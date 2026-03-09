@@ -261,7 +261,7 @@ class MCPZoteroServer:
         """
         logger.debug(f"search_documents called with query: {query}")
 
-        temp_top_sentences = 50
+        temp_top_sentences = max(50,top_sentences)
 
 
 
