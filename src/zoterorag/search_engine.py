@@ -151,6 +151,15 @@ class SearchEngine:
 
         logger.debug("Searching query: %s", query_embedding)
 
+        emit_progress(
+            {
+                "stage": "semantic_search",
+                "percentage": 30,
+                "message": "Searching for similar sentences",
+                "detail": "Query embedding generated, now searching the vector index for similar sentences",
+            }
+        )
+
         # Ask the vector DB for the best matches; do NOT ask for embeddings.
         ids, distances, metadatas = self.vector_store.search_sentence_ids(
             query_embedding=query_embedding,
@@ -172,9 +181,28 @@ class SearchEngine:
 
         id_to_text = self.vector_store.get_sentence_texts_by_ids(ids)
 
+        emit_progress(
+            {
+                "stage": "metadata_fetch",
+                "percentage": 45,
+                "message": f"Found {len(ids)} similar sentence{'s' if len(ids) != 1 else ''}. Fetching metadata",
+                "detail": "Fetched similar sentence texts, now processing results",
+                "similar_sentences": 0,
+            }
+        )
+
         results: list[SearchResult] = []
         for i, sid in enumerate(ids):
             text = id_to_text.get(sid, "")
+            emit_progress(
+                {
+                    "stage": "metadata_fetch",
+                    "percentage": 45 + int((i + 1) / len(ids) * 15),
+                    "message": f"Processing sentence {i + 1} of {len(ids)}",
+                    "detail": "Processing similar sentences and fetching metadata for sentence.",
+                    "similar_sentences": 0,
+                }
+            )
             if not text:
                 continue
 
@@ -216,7 +244,7 @@ class SearchEngine:
         emit_progress(
             {
                 "stage": "vector_search",
-                "percentage": 45,
+                "percentage": 60,
                 "message": f"Found {len(results)} similar sentence{'s' if len(results) != 1 else ''}",
                 "detail": "Semantic search finished",
                 "similar_sentences": len(results),

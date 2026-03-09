@@ -331,7 +331,17 @@ class MCPZoteroServer:
             except Exception:
                 logger.debug("Search progress callback failed", exc_info=True)
 
-        temp_top_sentences = max(50, top_sentences)
+        temp_top_sentences = max(50, top_sentences) if not require_cited_bibtex else max(50,top_sentences*10)
+
+        emit_progress(
+            {
+                "stage": "start",
+                "percentage": 0,
+                "message": "Starting search",
+                "detail": "Initializing search across embedded documents",
+                "result_count": 0,
+            }
+        )
 
         results = self.search_engine.search_best_sentences(
             query=query,
@@ -405,7 +415,7 @@ class MCPZoteroServer:
             {
                 "stage": "metadata",
                 "percentage": 78 if total_metadata else 95,
-                "message": f"Gathering Metadata 0 of {total_metadata}",
+                "message": f"Gathering Final Metadata 0 of {total_metadata}",
                 "detail": "Fetching Zotero metadata for the final result documents",
                 "metadata_current": 0,
                 "metadata_total": total_metadata,
@@ -431,7 +441,7 @@ class MCPZoteroServer:
                 {
                     "stage": "metadata",
                     "percentage": 78 + ((17 * index) / total_metadata) if total_metadata else 95,
-                    "message": f"Gathering Metadata {index} of {total_metadata}",
+                    "message": f"Gathering Final Metadata {index} of {total_metadata}",
                     "detail": f"Loaded metadata for document {index} of {total_metadata}",
                     "metadata_current": index,
                     "metadata_total": total_metadata,
