@@ -277,7 +277,6 @@ class MCPZoteroServer:
         if require_cited_bibtex:
             before = len(results)
             results = [r for r in results if getattr(r, "cited_bibtex", None)]
-            results = results[:top_sentences]
             logger.debug(f"Filtered require_cited_bibtex: {before} -> {len(results)}")
 
         ret = []
