@@ -1,7 +1,7 @@
 # SemTero
 
 
-SemTero is a local RAG stack for your Zotero library.
+SemTero is a local semantic search for your Zotero library designed for sentence-level search with rich metadata and citation support.
 It embeds PDF-backed Zotero items with Ollama, enables semantic search over the embedded sentences, and exposes a small web UI and MCP server for you.
 
 ![SemTero UI](images/semtero.png "SemTero")
