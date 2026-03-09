@@ -63,6 +63,7 @@ class TestWebUIAPI:
                 min_relevance=0.75,
                 citation_return_mode="both",
                 require_cited_bibtex=False,
+                **kwargs,
             ):
                 return mock_results
 
@@ -141,6 +142,44 @@ class TestWebUIAPI:
             assert response.status_code == 202
             data = response.get_json()
             assert data["status"] == "started"
+
+    def test_search_progress_endpoint_returns_finished_state(self, client):
+        with patch("webui.app.get_server") as mock_get_server:
+            mock_server = MagicMock()
+
+            async def mock_search(*args, **kwargs):
+                progress_callback = kwargs.get("progress_callback")
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "metadata",
+                            "percentage": 82,
+                            "message": "Gathering Metadata 1 of 2",
+                            "detail": "Loaded metadata for document 1 of 2",
+                        }
+                    )
+                return [{"text": "done", "document_title": "Doc"}]
+
+            mock_server.search_documents = mock_search
+            mock_get_server.return_value = mock_server
+
+            response = client.post(
+                "/api/search",
+                json={"query": "test", "search_id": "search-123"},
+            )
+            assert response.status_code == 200
+
+            progress = client.get("/api/search-progress/search-123")
+            assert progress.status_code == 200
+            payload = progress.get_json()
+            assert payload["finished"] is True
+            assert payload["percentage"] == 100
+            assert payload["result_count"] == 1
+            assert payload["message"] == "Found 1 result"
+
+    def test_search_progress_endpoint_returns_404_for_unknown_search(self, client):
+        response = client.get("/api/search-progress/missing-search")
+        assert response.status_code == 404
 
 
 class TestWebUIAvailability:

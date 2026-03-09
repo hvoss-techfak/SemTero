@@ -66,9 +66,15 @@
                     </div>
                 </form>
                 
-                <div id="loading" class="hidden">
-                    <div class="spinner"></div>
-                    <p>Searching...</p>
+                <div id="loading" class="hidden search-progress" role="status" aria-live="polite">
+                    <div class="search-progress-header">
+                        <p id="search-progress-label">Preparing search</p>
+                        <span id="search-progress-percent">0%</span>
+                    </div>
+                    <div class="progress-shell" aria-label="Search progress">
+                        <div id="search-progress-bar" class="progress-fill progress-fill-search" style="width: 0%"></div>
+                    </div>
+                    <p id="search-progress-detail" class="search-progress-detail">Starting semantic search</p>
                 </div>
             </section>
 

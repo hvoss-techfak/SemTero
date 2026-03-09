@@ -151,6 +151,41 @@ class TestSearchBestSentences:
         assert "hello [5]" in r3[0].text
         assert "@article" in r3[0].text
 
+    @patch("zoterorag.search_engine.Client")
+    @patch("zoterorag.search_engine.VectorStore")
+    def test_search_best_sentences_emits_progress_updates(
+        self, mock_vector_store_cls, mock_client_cls
+    ):
+        mock_client = MagicMock()
+        mock_client.embeddings.return_value = {"embedding": [0.0, 0.0, 1.0]}
+        mock_client_cls.return_value = mock_client
+
+        config = Config()
+        config.EMBEDDING_DIMENSIONS = 0
+        engine = SearchEngine(config)
+
+        mock_vs = MagicMock()
+        mock_vs.get_detected_dimension.return_value = None
+        mock_vs.search_sentence_ids.return_value = (
+            ["s1"],
+            [0.8],
+            [{"document_key": "docA"}],
+        )
+        mock_vs.get_sentence_texts_by_ids.return_value = {"s1": "hello"}
+        engine.vector_store = mock_vs
+
+        updates = []
+        results = engine.search_best_sentences(
+            "q",
+            top_sentences=1,
+            progress_callback=updates.append,
+        )
+
+        assert len(results) == 1
+        assert updates[0]["message"] == "Embedding sentence"
+        assert updates[-1]["message"] == "Found 1 similar sentence"
+        assert updates[-1]["similar_sentences"] == 1
+
 
 class TestGetStats:
     """Test suite for get_stats method."""

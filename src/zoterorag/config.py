@@ -94,7 +94,7 @@ class Config:
         )
 
         # Embedding dimensions: 0 means auto-detect from model
-        self.EMBEDDING_DIMENSIONS: int = _get_int("EMBEDDING_DIMENSIONS", 1024)
+        self.EMBEDDING_DIMENSIONS: int = _get_int("EMBEDDING_DIMENSIONS", 2560)
 
         # Search parameters
         self.DEFAULT_TOP_X: int = _get_int("DEFAULT_TOP_X", 10)

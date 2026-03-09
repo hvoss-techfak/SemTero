@@ -118,6 +118,10 @@ h2 {
     transition: width 0.3s ease;
 }
 
+.progress-fill-search {
+    background: linear-gradient(90deg, #0f766e, var(--primary-color));
+}
+
 .status-meta {
     display: flex;
     flex-wrap: wrap;
@@ -207,22 +211,37 @@ h2 {
 }
 
 #loading {
-    text-align: center;
-    padding: 2rem;
+    padding: 1.25rem 0 0;
 }
 
-.spinner {
-    width: 40px;
-    height: 40px;
-    margin: 0 auto 1rem;
-    border: 3px solid var(--border-color);
-    border-top-color: var(--primary-color);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
+.search-progress {
+    border-top: 1px solid var(--border-color);
+    margin-top: 0.25rem;
 }
 
-@keyframes spin {
-    to { transform: rotate(360deg); }
+.search-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+#search-progress-label {
+    color: var(--text-primary);
+}
+
+#search-progress-percent {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+.search-progress-detail {
+    margin-top: 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
 }
 
 .results-header {

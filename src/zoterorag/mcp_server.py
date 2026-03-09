@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 
 from fastmcp import FastMCP
 
@@ -244,6 +244,7 @@ class MCPZoteroServer:
         min_relevance: float = 0.75,
         citation_return_mode: CitationReturnMode = "sentence",
         require_cited_bibtex: bool = False,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> list[dict]:
         """Search across embedded documents.
 
@@ -261,15 +262,28 @@ class MCPZoteroServer:
         """
         logger.debug(f"search_documents called with query: {query}")
 
-        temp_top_sentences = max(50,top_sentences)
+        def emit_progress(payload: dict[str, Any]) -> None:
+            if not progress_callback:
+                return
+            try:
+                percentage = payload.get("percentage")
+                if percentage is not None:
+                    payload = {
+                        **payload,
+                        "percentage": max(0.0, min(100.0, float(percentage))),
+                    }
+                progress_callback(payload)
+            except Exception:
+                logger.debug("Search progress callback failed", exc_info=True)
 
-
+        temp_top_sentences = max(50, top_sentences)
 
         results = self.search_engine.search_best_sentences(
             query=query,
             document_key=document_key,
             top_sentences=temp_top_sentences,
             citation_return_mode=citation_return_mode,
+            progress_callback=emit_progress,
         )
 
         logger.debug(f"Initial search returned {len(results)} results before filtering")
@@ -294,7 +308,26 @@ class MCPZoteroServer:
 
         if len(ret) == 0:
             logger.debug("No results above relevance threshold")
+            emit_progress(
+                {
+                    "stage": "complete",
+                    "percentage": 100,
+                    "message": "No results found",
+                    "detail": "No sentences remained after the relevance filters",
+                    "result_count": 0,
+                }
+            )
             return []
+
+        emit_progress(
+            {
+                "stage": "reranking",
+                "percentage": 60,
+                "message": "Performing reranking",
+                "detail": f"Reranking {len(ret)} candidate sentence{'s' if len(ret) != 1 else ''}",
+                "candidate_sentences": len(ret),
+            }
+        )
 
         # Do reranking
         results = self.do_reranking(ret, query)
@@ -308,24 +341,47 @@ class MCPZoteroServer:
         # First pass: collect all unique keys and fetch metadata for each once
         # This ensures we call Zotero API at most once per unique document
         key_to_metadata: dict[str, dict] = {}
+        metadata_keys = [
+            r.zotero_key for r in results if r.zotero_key and r.zotero_key not in key_to_metadata
+        ]
+        total_metadata = len(metadata_keys)
 
-        for r in results:
-            zotero_key = r.zotero_key
+        emit_progress(
+            {
+                "stage": "metadata",
+                "percentage": 78 if total_metadata else 95,
+                "message": f"Gathering Metadata 0 of {total_metadata}",
+                "detail": "Fetching Zotero metadata for the final result documents",
+                "metadata_current": 0,
+                "metadata_total": total_metadata,
+            }
+        )
+
+        for index, zotero_key in enumerate(metadata_keys, start=1):
             logger.debug(f"Processing result with zotero_key: {zotero_key}")
 
-            if zotero_key and zotero_key not in key_to_metadata:
-                # Fetch Zotero metadata (only once per unique document)
-                meta = self._get_metadata_for_key(zotero_key)
+            meta = self._get_metadata_for_key(zotero_key)
 
-                # If no Zotero title, fall back to vector store title
-                if not meta.get("title"):
-                    vs_title = self.search_engine.vector_store.get_document_title(
-                        zotero_key
-                    )
-                    if vs_title:
-                        meta["title"] = vs_title
+            # If no Zotero title, fall back to vector store title
+            if not meta.get("title"):
+                vs_title = self.search_engine.vector_store.get_document_title(
+                    zotero_key
+                )
+                if vs_title:
+                    meta["title"] = vs_title
 
-                key_to_metadata[zotero_key] = meta
+            key_to_metadata[zotero_key] = meta
+
+            emit_progress(
+                {
+                    "stage": "metadata",
+                    "percentage": 78 + ((17 * index) / total_metadata) if total_metadata else 95,
+                    "message": f"Gathering Metadata {index} of {total_metadata}",
+                    "detail": f"Loaded metadata for document {index} of {total_metadata}",
+                    "metadata_current": index,
+                    "metadata_total": total_metadata,
+                }
+            )
 
         # Second pass: apply metadata to ALL results (not just the first one per key)
         enriched_results = []
@@ -364,6 +420,16 @@ class MCPZoteroServer:
                 )
 
             enriched_results.append(result_dict)
+
+        emit_progress(
+            {
+                "stage": "complete",
+                "percentage": 100,
+                "message": f"Found {len(enriched_results)} result{'s' if len(enriched_results) != 1 else ''}",
+                "detail": "Search complete",
+                "result_count": len(enriched_results),
+            }
+        )
 
         return enriched_results
 

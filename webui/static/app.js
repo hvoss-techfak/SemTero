@@ -7,6 +7,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const queryInput = document.getElementById('query-input');
     const searchButton = document.getElementById('search-button');
     const loadingDiv = document.getElementById('loading');
+    const searchProgressBar = document.getElementById('search-progress-bar');
+    const searchProgressLabel = document.getElementById('search-progress-label');
+    const searchProgressDetail = document.getElementById('search-progress-detail');
+    const searchProgressPercent = document.getElementById('search-progress-percent');
     const resultsSection = document.getElementById('results-section');
     const resultsContainer = document.getElementById('results-container');
     const resultCount = document.getElementById('result-count');
@@ -20,6 +24,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const embedProgressText = document.getElementById('embed-progress-text');
     const embedSentencesText = document.getElementById('embed-sentences-text');
     const embedNextRun = document.getElementById('embed-next-run');
+    let activeSearchToken = 0;
 
     // Update relevance value display
     minRelevanceInput.addEventListener('input', function() {
@@ -57,8 +62,17 @@ document.addEventListener('DOMContentLoaded', function() {
         const query = queryInput.value.trim();
         if (!query) return;
 
+        const searchToken = ++activeSearchToken;
+        const searchId = generateSearchId();
+        const stopPolling = startSearchProgressPolling(searchId, searchToken);
+
         // Show loading, hide results and errors
         showLoading(true);
+        renderSearchProgress({
+            percentage: 4,
+            message: 'Preparing search',
+            detail: 'Starting semantic search'
+        });
         hideResults();
         hideError();
 
@@ -76,7 +90,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     query: query,
                     top_sentences: parseInt(topSentences),
                     min_relevance: parseFloat(minRelevance),
-                    require_cited_bibtex: requireCitedBibtex
+                    require_cited_bibtex: requireCitedBibtex,
+                    search_id: searchId
                 })
             });
 
@@ -86,18 +101,86 @@ document.addEventListener('DOMContentLoaded', function() {
                 throw new Error(data.error || 'Search failed');
             }
 
-            displayResults(data.results, data.count);
+            stopPolling();
+            if (searchToken === activeSearchToken) {
+                displayResults(data.results, data.count);
+            }
 
         } catch (error) {
-            showError(error.message);
+            stopPolling();
+            if (searchToken === activeSearchToken) {
+                showError(error.message);
+            }
         } finally {
-            showLoading(false);
+            if (searchToken === activeSearchToken) {
+                showLoading(false);
+            }
         }
     });
 
     function showLoading(show) {
         loadingDiv.classList.toggle('hidden', !show);
         searchButton.disabled = show;
+    }
+
+    function renderSearchProgress(progress) {
+        const pct = Math.max(0, Math.min(100, Number(progress.percentage || 0)));
+        const message = progress.message || 'Searching';
+        const detail = progress.detail || '';
+
+        searchProgressBar.style.width = `${pct}%`;
+        searchProgressLabel.textContent = message;
+        searchProgressDetail.textContent = detail;
+        searchProgressPercent.textContent = `${Math.round(pct)}%`;
+    }
+
+    function startSearchProgressPolling(searchId, searchToken) {
+        let timeoutId = null;
+        let stopped = false;
+
+        async function poll() {
+            if (stopped || searchToken !== activeSearchToken) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/search-progress/${encodeURIComponent(searchId)}`, {
+                    cache: 'no-store'
+                });
+
+                if (response.ok) {
+                    const progress = await response.json();
+                    if (searchToken === activeSearchToken) {
+                        renderSearchProgress(progress);
+                    }
+                    if (progress.finished) {
+                        return;
+                    }
+                }
+            } catch (error) {
+                console.debug('Search progress polling failed', error);
+            }
+
+            if (!stopped && searchToken === activeSearchToken) {
+                timeoutId = window.setTimeout(poll, 350);
+            }
+        }
+
+        timeoutId = window.setTimeout(poll, 0);
+
+        return function stop() {
+            stopped = true;
+            if (timeoutId !== null) {
+                window.clearTimeout(timeoutId);
+            }
+        };
+    }
+
+    function generateSearchId() {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
+        }
+        return `search-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
 
     function hideResults() {

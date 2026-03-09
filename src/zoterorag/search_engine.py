@@ -1,7 +1,7 @@
 """RAG search using sentence embeddings."""
 
 import logging
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
 from ollama import Client
 
@@ -102,6 +102,7 @@ class SearchEngine:
         top_sentences: int = 10,
         ensure_sentence_embeddings: bool = True,
         citation_return_mode: CitationReturnMode = "sentence",
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> List[SearchResult]:
         """Return the best matching embedded sentences.
 
@@ -124,10 +125,27 @@ class SearchEngine:
             # No auto-embedding here; embedding is handled by EmbeddingManager.
             pass
 
+        def emit_progress(payload: dict[str, Any]) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(payload)
+            except Exception:
+                logger.debug("Search progress callback failed", exc_info=True)
+
         # Keep signature compatibility; top_sections is currently unused in sentence-only mode.
         _ = top_sections
 
         logger.debug("Embedding query: %s", query)
+
+        emit_progress(
+            {
+                "stage": "embedding",
+                "percentage": 20,
+                "message": "Embedding sentence",
+                "detail": "Generating the query embedding",
+            }
+        )
 
         query_embedding = self._get_query_embedding(query)
 
@@ -141,6 +159,15 @@ class SearchEngine:
         )
 
         if not ids:
+            emit_progress(
+                {
+                    "stage": "vector_search",
+                    "percentage": 45,
+                    "message": "Found 0 similar sentences",
+                    "detail": "No semantic matches were returned",
+                    "similar_sentences": 0,
+                }
+            )
             return []
 
         id_to_text = self.vector_store.get_sentence_texts_by_ids(ids)
@@ -185,7 +212,17 @@ class SearchEngine:
             )
 
         results.sort(key=lambda r: r.relevance_score, reverse=True)
-        return results[: max(1, int(top_sentences))]
+        results = results[: max(1, int(top_sentences))]
+        emit_progress(
+            {
+                "stage": "vector_search",
+                "percentage": 45,
+                "message": f"Found {len(results)} similar sentence{'s' if len(results) != 1 else ''}",
+                "detail": "Semantic search finished",
+                "similar_sentences": len(results),
+            }
+        )
+        return results
 
     def get_stats(self) -> dict:
         return {

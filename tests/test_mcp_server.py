@@ -49,6 +49,7 @@ def test_mcp_search_documents_passes_citation_return_mode_and_filters_require_ci
         return [r_with, r_without]
 
     server.search_engine.search_best_sentences = fake_search_best_sentences
+    server.do_reranking = lambda results, query: results
 
     out = asyncio.run(
         server.search_documents(
@@ -189,7 +190,7 @@ def test_do_reranking_passes_vram_threshold_and_releases_device(monkeypatch):
     calls = []
 
     class FakeReranker:
-        def __init__(self, min_gpu_vram_gb=8.0):
+        def __init__(self, model_name=None, min_gpu_vram_gb=8.0):
             calls.append(("init", min_gpu_vram_gb))
 
         def rerank(self, results, query):
@@ -232,7 +233,7 @@ def test_do_reranking_releases_device_when_rerank_fails(monkeypatch):
     calls = []
 
     class FakeReranker:
-        def __init__(self, min_gpu_vram_gb=8.0):
+        def __init__(self, model_name=None, min_gpu_vram_gb=8.0):
             calls.append(("init", min_gpu_vram_gb))
 
         def rerank(self, results, query):
@@ -248,3 +249,40 @@ def test_do_reranking_releases_device_when_rerank_fails(monkeypatch):
         server.do_reranking([], "query")
 
     assert [item[0] for item in calls] == ["init", "rerank", "release"]
+
+
+def test_mcp_search_documents_emits_progress_updates(monkeypatch):
+    config = Config()
+    server = MCPZoteroServer(config)
+
+    monkeypatch.setattr(
+        server,
+        "_get_metadata_for_key",
+        lambda key: {"title": "Doc Title", "bibtex": "", "file_path": "", "authors": [], "date": "", "item_type": ""},
+    )
+    server.search_engine.vector_store.get_document_title = lambda key: "Doc Title"
+    server.do_reranking = lambda results, query: results
+    server.search_engine.search_best_sentences = lambda **kwargs: [
+        SearchResult(
+            text="match",
+            document_title="",
+            section_title="",
+            zotero_key="doc1",
+            relevance_score=0.9,
+        )
+    ]
+
+    updates = []
+    out = asyncio.run(
+        server.search_documents(
+            query="query",
+            min_relevance=0.0,
+            progress_callback=updates.append,
+        )
+    )
+
+    assert len(out) == 1
+    assert any(update.get("stage") == "reranking" for update in updates)
+    assert any(update.get("message") == "Gathering Metadata 1 of 1" for update in updates)
+    assert updates[-1]["stage"] == "complete"
+    assert updates[-1]["result_count"] == 1
