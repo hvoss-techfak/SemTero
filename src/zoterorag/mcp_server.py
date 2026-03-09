@@ -261,9 +261,9 @@ class MCPZoteroServer:
         """
         logger.debug(f"search_documents called with query: {query}")
 
-        temp_top_sentences = (
-            top_sentences * 10 if require_cited_bibtex else top_sentences
-        )
+        temp_top_sentences = 50
+
+
 
         results = self.search_engine.search_best_sentences(
             query=query,
@@ -301,6 +301,10 @@ class MCPZoteroServer:
         results = self.do_reranking(ret, query)
 
         logger.debug(f"Got {len(results)} search results")
+
+        #keeping only top_sentences after reranking and filtering
+        results = results[:top_sentences]
+        logger.debug(f"Trimmed to top_sentences={top_sentences}: {len(results)} results")
 
         # First pass: collect all unique keys and fetch metadata for each once
         # This ensures we call Zotero API at most once per unique document
