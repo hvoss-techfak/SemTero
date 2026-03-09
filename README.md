@@ -9,6 +9,7 @@ It embeds PDF-backed Zotero items with Ollama, serves search over the embedded s
 
 This project talks to Zotero's local API/connector (default: `http://127.0.0.1:23119`).
 If Zotero is not running, document discovery, PDF access, metadata lookup, and BibTeX import will fail.
+Enable "Allow other appplications on this computer to communicate with Zotero" in Zotero's "Advanced" settings to allow the app to connect.
 
 ## What you get
 
@@ -160,7 +161,7 @@ uv run python main.py --transport stdio
 
 ## Search result behavior
 
-Search results now include:
+Search results include:
 
 - matched sentence text
 - document title and metadata

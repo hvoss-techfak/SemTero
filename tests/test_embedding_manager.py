@@ -24,6 +24,7 @@ class TestEmbeddingManager:
         """Create a mock Config object."""
         config = MagicMock(spec=Config)
         config.VECTOR_STORE_DIR = "./data/vector_store"
+        config.OLLAMA_BASE_URL = "http://localhost:11434"
         config.PAGE_SPLITS = 4
         config.EMBEDDING_MODEL = "qwen3-embedding-4b"
         config.RERANKER_MODEL = "Qwen3-Reranker-8B"
@@ -409,3 +410,20 @@ class TestEmbeddingManager:
                 sentences = manager.process_document(doc, "/nonexistent/file.pdf")
 
                 assert sentences == []
+
+    @patch("zoterorag.embedding_manager.requests.post")
+    def test_embed_text_raises_on_dimension_mismatch(self, mock_post, mock_config):
+        mock_config.EMBEDDING_DIMENSIONS = 1024
+
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"embeddings": [[0.1] * 2560]}
+        mock_post.return_value = response
+
+        with patch("zoterorag.embedding_manager.VectorStore"):
+            with patch("zoterorag.embedding_manager.PDFProcessor"):
+                manager = EmbeddingManager(mock_config)
+                manager.vector_store.get_detected_dimension.return_value = None
+
+                with pytest.raises(ValueError, match="EMBEDDING_DIMENSIONS=1024"):
+                    manager.embed_text(["test"])

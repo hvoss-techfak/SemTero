@@ -159,6 +159,46 @@ class EmbeddingManager:
             opts["dimensions"] = self.config.EMBEDDING_DIMENSIONS
         return opts
 
+    def _get_store_dimension(self) -> int | None:
+        try:
+            detected = self.vector_store.get_detected_dimension()
+        except Exception:
+            return None
+        return detected if isinstance(detected, int) and detected > 0 else None
+
+    def _validate_embeddings(
+        self, embeddings: List[List[float]], *, context: str = "embedding request"
+    ) -> List[List[float]]:
+        if not embeddings:
+            return []
+
+        dims = sorted({len(emb or []) for emb in embeddings})
+        if not dims or dims == [0]:
+            raise ValueError(f"{context} returned empty embeddings")
+        if len(dims) != 1:
+            raise ValueError(
+                f"{context} returned inconsistent embedding dimensions: {dims}"
+            )
+
+        actual_dim = dims[0]
+        expected_dim = int(getattr(self.config, "EMBEDDING_DIMENSIONS", 0) or 0)
+        if expected_dim > 0 and actual_dim != expected_dim:
+            raise ValueError(
+                "Embedding provider returned "
+                f"{actual_dim}-dimensional vectors but EMBEDDING_DIMENSIONS={expected_dim}. "
+                "This usually means the model/server ignored the requested dimensions."
+            )
+
+        store_dim = self._get_store_dimension()
+        if store_dim and actual_dim != store_dim:
+            raise ValueError(
+                "Embedding provider returned "
+                f"{actual_dim}-dimensional vectors but the existing vector store uses {store_dim}. "
+                "Clear the vector store or re-embed with a consistent model/dimension setting."
+            )
+
+        return [[float(x) for x in emb] for emb in embeddings]
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def _embed_text(self, texts: List[str]) -> List[List[float]]:
         logger.debug(f"Embedding single text (batch size 1): {texts[0][:60]}...")
@@ -167,7 +207,9 @@ class EmbeddingManager:
             prompt=texts[0],
             options=self._get_embedding_options(),
         )
-        return [response["embedding"]]
+        return self._validate_embeddings(
+            [response["embedding"]], context="single embedding request"
+        )
 
     def embed_text(self, text_list: List[str]) -> List[List[float]]:
         # we need to request manually
@@ -195,7 +237,7 @@ class EmbeddingManager:
         ):
             raise ValueError(f"Unexpected embedding response format: {response}")
 
-        return embeddings
+        return self._validate_embeddings(embeddings, context="batch embedding request")
 
     def _embed_batch_ollama(self, texts: List[str]) -> List[List[float]]:
         if not texts:

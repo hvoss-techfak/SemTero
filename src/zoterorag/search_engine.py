@@ -40,6 +40,33 @@ class SearchEngine:
             opts["dimensions"] = self.config.EMBEDDING_DIMENSIONS
         return opts
 
+    def _get_store_dimension(self) -> int | None:
+        detected = self.vector_store.get_detected_dimension()
+        return detected if isinstance(detected, int) and detected > 0 else None
+
+    def _validate_query_embedding(self, embedding: List[float]) -> List[float]:
+        actual_dim = len(embedding or [])
+        if actual_dim <= 0:
+            raise ValueError("Embedding provider returned an empty query embedding")
+
+        expected_dim = int(getattr(self.config, "EMBEDDING_DIMENSIONS", 0) or 0)
+        if expected_dim > 0 and actual_dim != expected_dim:
+            raise ValueError(
+                "Embedding provider returned "
+                f"a {actual_dim}-dimensional query vector but EMBEDDING_DIMENSIONS={expected_dim}. "
+                "This usually means the model/server ignored the requested dimensions."
+            )
+
+        store_dim = self._get_store_dimension()
+        if store_dim and actual_dim != store_dim:
+            raise ValueError(
+                "Embedding provider returned "
+                f"a {actual_dim}-dimensional query vector but the vector store uses {store_dim}. "
+                "Clear the vector store or re-embed with a consistent model/dimension setting."
+            )
+
+        return [float(x) for x in embedding]
+
     def _get_query_embedding(self, query: str) -> List[float]:
         client = Client(host=self.config.OLLAMA_BASE_URL)
         response = client.embeddings(
@@ -47,7 +74,7 @@ class SearchEngine:
             prompt=query,
             options=self._get_embedding_options(),
         )
-        return response["embedding"]
+        return self._validate_query_embedding(response["embedding"])
 
     def search(
         self,
@@ -133,9 +160,13 @@ class SearchEngine:
             cited_texts = list(meta.get("referenced_texts") or [])
             citation_numbers = list(meta.get("citation_numbers") or [])
 
-            # Shape the result text.
+            bibtex_block = "\n\n".join([b for b in cited_bibtex if b])
             if citation_return_mode == "bibtex":
-                shaped_text = "\n\n".join([b for b in cited_bibtex if b])
+                shaped_text = bibtex_block
+            elif citation_return_mode == "both":
+                shaped_text = text
+                if bibtex_block:
+                    shaped_text = f"{text}\n\n{bibtex_block}"
             else:
                 shaped_text = text
 

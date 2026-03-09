@@ -23,6 +23,7 @@ from zoterorag.zotero_client import ZoteroClient
 
 try:
     from webui.app import run as run_webui
+
     WEBUI_AVAILABLE = True
 except ImportError:
     run_webui = None
@@ -55,7 +56,9 @@ class ZoteroRAGApplication:
             self.server = MCPZoteroServer(self.config)
             set_server_instance(self.server)
             self.embedding_manager = self.server.embedding_manager
-            self.server.register_embedding_status_listener(self._handle_embedding_status)
+            self.server.register_embedding_status_listener(
+                self._handle_embedding_status
+            )
             logger.info("All services initialized successfully")
             return True
         except Exception as exc:
@@ -75,7 +78,11 @@ class ZoteroRAGApplication:
     @staticmethod
     def _format_embed_progress_line(status) -> str:
         total = max(0, status.total_documents)
-        processed = min(status.processed_documents, total) if total else status.processed_documents
+        processed = (
+            min(status.processed_documents, total)
+            if total
+            else status.processed_documents
+        )
         pct = status.progress_percentage if total else 0.0
         width = 28
         filled = int((pct / 100.0) * width) if total else 0
@@ -102,7 +109,11 @@ class ZoteroRAGApplication:
             return
 
         now = time.time()
-        if not force and (now - self._last_embed_progress_log_ts) < self._embed_progress_interval_sec:
+        if (
+            not force
+            and (now - self._last_embed_progress_log_ts)
+            < self._embed_progress_interval_sec
+        ):
             return
 
         self._last_embed_progress_log_ts = now
@@ -154,11 +165,15 @@ class ZoteroRAGApplication:
 
                     next_run = finished_at + timedelta(minutes=interval_minutes)
                     self.server.set_next_auto_reembed_at(
-                        next_run.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+                        next_run.astimezone(timezone.utc)
+                        .replace(microsecond=0)
+                        .isoformat()
                     )
 
                     if datetime.now(timezone.utc) >= next_run.astimezone(timezone.utc):
-                        result = self.server.start_background_embedding(trigger="scheduled")
+                        result = self.server.start_background_embedding(
+                            trigger="scheduled"
+                        )
                         if result.get("status") == "started":
                             self.server.set_next_auto_reembed_at("")
 
@@ -188,7 +203,9 @@ class ZoteroRAGApplication:
         except Exception as exc:
             logger.error("Failed to start web UI: %s", exc)
 
-    def run_mcp_server(self, *, enable_webui: bool = True, webui_port: int = 23121) -> None:
+    def run_mcp_server(
+        self, *, enable_webui: bool = True, webui_port: int = 23121
+    ) -> None:
         """Run the MCP server with stdio transport."""
         if not self.server and not self.initialize():
             sys.exit(1)
@@ -228,6 +245,7 @@ class ZoteroRAGApplication:
         logger.info("Running in daemon mode...")
         while self._running:
             try:
+
                 async def check_sync() -> None:
                     result = await self.server.sync_and_embed(embed_sentences=False)
                     logger.info("Sync status: %s", result)
@@ -240,14 +258,15 @@ class ZoteroRAGApplication:
     def shutdown(self) -> None:
         """Graceful shutdown."""
         logger.info("Shutting down...")
-        if self.embedding_manager:
-            self.embedding_manager.shutdown()
         if self.server:
             self.server.shutdown()
+        elif self.embedding_manager:
+            self.embedding_manager.shutdown()
         logger.info("Shutdown complete")
 
     def test_zotero_connection(self) -> bool | str:
         """Test Zotero API connectivity."""
+        client = None
         try:
             client = ZoteroClient(api_url=self.config.ZOTERO_API_URL)
             return client.check_connection()
@@ -256,6 +275,9 @@ class ZoteroRAGApplication:
             if "connection" in str(exc).lower() or "refused" in str(exc).lower():
                 return "no_server"
             return False
+        finally:
+            if client is not None:
+                client.close()
 
     def test_ollama_connection(self) -> bool | str:
         """Test Ollama connectivity and model availability."""
@@ -267,7 +289,11 @@ class ZoteroRAGApplication:
         except Exception as exc:
             error_msg = str(exc).lower()
             logger.debug("Ollama connection test failed: %s", exc)
-            if "connection" in error_msg or "refused" in error_msg or "connect" in error_msg:
+            if (
+                "connection" in error_msg
+                or "refused" in error_msg
+                or "connect" in error_msg
+            ):
                 return "no_server"
             if "model" in error_msg or "not found" in error_msg or "404" in error_msg:
                 return "no_model"
@@ -281,10 +307,20 @@ class ZoteroRAGApplication:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="ZoteroRAG - MCP Server for Zotero with RAG")
-    parser.add_argument("--daemon", action="store_true", help="Run in daemon mode with periodic sync")
-    parser.add_argument("--test-ollama", action="store_true", help="Test Ollama connectivity and exit")
-    parser.add_argument("--test-zotero", action="store_true", help="Test Zotero API connectivity and exit")
+    parser = argparse.ArgumentParser(
+        description="ZoteroRAG - MCP Server for Zotero with RAG"
+    )
+    parser.add_argument(
+        "--daemon", action="store_true", help="Run in daemon mode with periodic sync"
+    )
+    parser.add_argument(
+        "--test-ollama", action="store_true", help="Test Ollama connectivity and exit"
+    )
+    parser.add_argument(
+        "--test-zotero",
+        action="store_true",
+        help="Test Zotero API connectivity and exit",
+    )
     parser.add_argument(
         "--transport",
         type=str,
@@ -292,9 +328,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["stdio", "http", "sse", "streamable-http"],
         help="Transport protocol to use (default: sse)",
     )
-    parser.add_argument("--port", type=int, default=23120, help="Port for HTTP/SSE transports")
+    parser.add_argument(
+        "--port", type=int, default=23120, help="Port for HTTP/SSE transports"
+    )
     parser.add_argument("--no-webui", action="store_true", help="Disable the web UI")
-    parser.add_argument("--webui-port", type=int, default=23121, help="Port for the web UI")
+    parser.add_argument(
+        "--webui-port", type=int, default=23121, help="Port for the web UI"
+    )
     parser.add_argument(
         "--host",
         type=str,
@@ -372,7 +412,11 @@ def main() -> None:
         if not args.no_webui:
             app._start_webui(host=args.webui_host, port=args.webui_port)
 
-        logger.info("MCP server starting with %s transport on port %s...", args.transport, args.port)
+        logger.info(
+            "MCP server starting with %s transport on port %s...",
+            args.transport,
+            args.port,
+        )
         try:
             mcp.run(transport=args.transport, host=args.host, port=args.port)
         except KeyboardInterrupt:
@@ -387,7 +431,9 @@ def main() -> None:
         if args.daemon:
             app.run_daemon()
         else:
-            app.run_mcp_server(enable_webui=not args.no_webui, webui_port=args.webui_port)
+            app.run_mcp_server(
+                enable_webui=not args.no_webui, webui_port=args.webui_port
+            )
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         app.shutdown()
@@ -395,4 +441,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

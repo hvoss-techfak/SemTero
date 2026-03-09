@@ -5,6 +5,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import lancedb
+import pyarrow as pa
 import pytest
 
 # Add src to path like main.py does
@@ -193,7 +195,7 @@ class TestVectorStore:
     def test_index_type_defaults_to_hnsw(self, temp_dir, monkeypatch):
         monkeypatch.delenv("LANCEDB_INDEX_TYPE", raising=False)
         store = VectorStore(persist_directory=str(temp_dir))
-        assert store._index_type == "HNSW"
+        assert store._index_type == "IVF_HNSW_SQ"
 
     def test_index_type_reads_env_case_insensitive(self, temp_dir, monkeypatch):
         monkeypatch.setenv("LANCEDB_INDEX_TYPE", "ivf_flat")
@@ -204,3 +206,60 @@ class TestVectorStore:
         monkeypatch.setenv("LANCEDB_INDEX_TYPE", "banana")
         store = VectorStore(persist_directory=str(temp_dir))
         assert store._index_type == "IVF_FLAT"
+
+    def test_add_sentences_handles_empty_first_batch_schema(self, vector_store):
+        first = self._sentence(
+            "doc1_sent_0", "doc1", "First sentence.", 0, page_section=None
+        )
+        second = self._sentence("doc1_sent_1", "doc1", "Second sentence [4].", 1)
+        second.citation_numbers = [4]
+        second.referenced_texts = ["A. Author. Paper. 2020."]
+        second.referenced_bibtex = ["@article{author2020,title={Paper}}"]
+
+        vector_store.add_sentences([first], [[0.1, 0.2, 0.3]], "doc1")
+        vector_store.add_sentences([second], [[0.3, 0.2, 0.1]], "doc1")
+
+        out = vector_store.get_sentences("doc1")
+        assert len(out) == 2
+        assert out[0].page_section is None
+        assert out[1].page_section == 1
+        assert out[1].citation_numbers == [4]
+        assert out[1].referenced_texts == ["A. Author. Paper. 2020."]
+        assert out[1].referenced_bibtex == ["@article{author2020,title={Paper}}"]
+
+    def test_repairs_legacy_null_typed_schema_on_reload(self, temp_dir):
+        db_dir = temp_dir / "lancedb"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db = lancedb.connect(str(db_dir))
+        legacy = pa.table(
+            {
+                "id": pa.array(["legacy-1"]),
+                "vector": pa.array([[0.1, 0.2, 0.3]], type=pa.list_(pa.float32(), 3)),
+                "document": pa.array(["legacy text"]),
+                "document_key": pa.array(["doc1"]),
+                "page": pa.array([1], type=pa.int64()),
+                "page_section": pa.nulls(1),
+                "sentence_index": pa.array([0], type=pa.int64()),
+                "citation_numbers": pa.array([[]]),
+                "referenced_texts": pa.array([[]]),
+                "referenced_bibtex": pa.array([[]]),
+            }
+        )
+        db.create_table("sentences", data=legacy, mode="overwrite")
+
+        store = VectorStore(persist_directory=str(temp_dir))
+        repaired_schema = store.sentences_table.schema
+        assert repaired_schema.field("page_section").type == pa.int64()
+        assert repaired_schema.field("referenced_texts").type == pa.list_(pa.string())
+        assert repaired_schema.field("referenced_bibtex").type == pa.list_(pa.string())
+
+        follow_up = self._sentence("doc1_sent_1", "doc1", "new text", 1, page_section=2)
+        follow_up.referenced_texts = ["Ref text"]
+        follow_up.referenced_bibtex = ["@article{new}"]
+        store.add_sentences([follow_up], [[0.4, 0.5, 0.6]], "doc1")
+
+        out = store.get_sentences("doc1")
+        assert len(out) == 2
+        assert out[1].page_section == 2
+        assert out[1].referenced_texts == ["Ref text"]
+        assert out[1].referenced_bibtex == ["@article{new}"]

@@ -47,7 +47,17 @@ class DoiClient:
 
     def __post_init__(self) -> None:
         base = self.base_url or "https://doi.org/"
-        self.base_url = base.rstrip("/") + "/"
+        object.__setattr__(self, "base_url", base.rstrip("/") + "/")
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self.session.close()
+
+    def __enter__(self) -> "DoiClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def fetch_bibtex(self, doi: str) -> str:
         """Fetch BibTeX for a DOI.

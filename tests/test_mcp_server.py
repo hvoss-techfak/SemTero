@@ -151,3 +151,22 @@ def test_get_embedding_status_returns_progress_payload(monkeypatch):
     assert payload["embedded_documents"] == 2
     assert payload["processed_documents"] == 2
     assert payload["next_auto_reembed_at"] == "2026-03-08T10:15:00+00:00"
+
+
+def test_shutdown_closes_http_clients(monkeypatch):
+    config = Config()
+    server = MCPZoteroServer(config)
+
+    calls = []
+
+    monkeypatch.setattr(
+        server.embedding_manager, "shutdown", lambda: calls.append("embedding")
+    )
+    monkeypatch.setattr(
+        server.zotero_client.session, "close", lambda: calls.append("zotero")
+    )
+    monkeypatch.setattr(server.doi_client.session, "close", lambda: calls.append("doi"))
+
+    server.shutdown()
+
+    assert calls == ["embedding", "zotero", "doi"]

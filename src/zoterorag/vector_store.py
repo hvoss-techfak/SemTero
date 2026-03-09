@@ -5,20 +5,40 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Optional, List, Any
+from typing import Any, List, Literal, Optional
 
 import lancedb
+import pyarrow as pa
 
 from .models import Sentence
 
 logger = logging.getLogger(__name__)
+
+IndexType = Literal["IVF_HNSW_SQ", "IVF_RQ", "IVF_PQ", "IVF_FLAT"]
 
 
 class VectorStore:
     """LanceDB wrapper for storing and retrieving sentence embeddings."""
 
     _TABLE_NAME = "sentences"
-    _SUPPORTED_INDEX_TYPES = {"IVF_HNSW_SQ", "IVF_RQ", "IVF_PQ", "IVF_FLAT"}
+    _SUPPORTED_INDEX_TYPES: set[IndexType] = {
+        "IVF_HNSW_SQ",
+        "IVF_RQ",
+        "IVF_PQ",
+        "IVF_FLAT",
+    }
+    _SENTENCE_COLUMNS = (
+        "id",
+        "vector",
+        "document",
+        "document_key",
+        "page",
+        "page_section",
+        "sentence_index",
+        "citation_numbers",
+        "referenced_texts",
+        "referenced_bibtex",
+    )
 
     def __init__(self, persist_directory: str = "./data/vector_store"):
         self.persist_directory = Path(persist_directory)
@@ -27,7 +47,6 @@ class VectorStore:
         self._embedded_docs_lock = threading.Lock()
         self._table_lock = threading.Lock()
 
-        # Keep Lance artifacts in a dedicated subdirectory.
         self.db_directory = self.persist_directory / "lancedb"
         self.db_directory.mkdir(parents=True, exist_ok=True)
         self.db = lancedb.connect(str(self.db_directory))
@@ -35,10 +54,11 @@ class VectorStore:
         self.sentences_table = self._open_table_if_exists()
         self._index_ready = False
         self._index_type = self._resolve_index_type()
-
         self._detected_sentence_dim: int | None = None
-        self._detect_dimensions()
         self.index_lock = threading.Lock()
+
+        self._repair_sentence_table_if_needed()
+        self._detect_dimensions()
 
     def _open_table_if_exists(self):
         try:
@@ -59,7 +79,7 @@ class VectorStore:
         escaped = ", ".join(f"'{cls._sql_quote(v)}'" for v in values)
         return f"{column} IN ({escaped})"
 
-    def _resolve_index_type(self) -> str:
+    def _resolve_index_type(self) -> IndexType:
         configured = os.getenv("LANCEDB_INDEX_TYPE", "IVF_HNSW_SQ")
         index_type = str(configured).strip().upper()
         if index_type not in self._SUPPORTED_INDEX_TYPES:
@@ -69,7 +89,7 @@ class VectorStore:
             )
             return "IVF_FLAT"
         logger.info("Using LanceDB index type: %s", index_type)
-        return index_type
+        return index_type  # type: ignore[return-value]
 
     def _refresh_table_handle(self) -> None:
         """Reopen table to observe the latest committed version from disk."""
@@ -77,21 +97,18 @@ class VectorStore:
             self.sentences_table = self._open_table_if_exists()
 
     def _ensure_cosine_index(self) -> None:
+        if not self.sentences_table:
+            return
         try:
             self.index_lock.acquire_lock()
-            if not self.sentences_table or self._index_ready:
-                try:
-                    self.sentences_table.optimize()
-                except Exception as e:
-                    logger.debug("Could not optimize LanceDB table: %s", e)
+            if self._index_ready:
+                return
             try:
-                # check if there is already an index on the vector column
                 existing_indexes = self.sentences_table.list_indices()
                 for idx in existing_indexes:
                     if "vector" in idx.columns and idx.name == "vector_idx":
                         self._index_ready = True
                         return
-
                 self.sentences_table.create_index(
                     metric="cosine",
                     vector_column_name="vector",
@@ -107,20 +124,109 @@ class VectorStore:
         finally:
             self.index_lock.release_lock()
 
-    def _detect_dimensions(self):
-        """Detect embedding dimensions from existing table rows."""
+    @classmethod
+    def _sentence_schema(cls, dim: int) -> pa.Schema:
+        return pa.schema(
+            [
+                pa.field("id", pa.string(), nullable=False),
+                pa.field("vector", pa.list_(pa.float32(), dim), nullable=False),
+                pa.field("document", pa.string(), nullable=False),
+                pa.field("document_key", pa.string(), nullable=False),
+                pa.field("page", pa.int64(), nullable=False),
+                pa.field("page_section", pa.int64(), nullable=True),
+                pa.field("sentence_index", pa.int64(), nullable=False),
+                pa.field("citation_numbers", pa.list_(pa.int64()), nullable=False),
+                pa.field("referenced_texts", pa.list_(pa.string()), nullable=False),
+                pa.field("referenced_bibtex", pa.list_(pa.string()), nullable=False),
+            ]
+        )
+
+    @staticmethod
+    def _vector_dimension_from_schema(schema: pa.Schema | None) -> int | None:
+        if schema is None or "vector" not in schema.names:
+            return None
+        try:
+            vector_type = schema.field("vector").type
+        except (KeyError, IndexError):
+            return None
+        if pa.types.is_fixed_size_list(vector_type):
+            return int(vector_type.list_size)
+        return None
+
+    @staticmethod
+    def _field_is_nullish(field: pa.Field) -> bool:
+        field_type = field.type
+        if pa.types.is_null(field_type):
+            return True
+        if (
+            pa.types.is_list(field_type)
+            or pa.types.is_large_list(field_type)
+            or pa.types.is_fixed_size_list(field_type)
+        ) and pa.types.is_null(field_type.value_type):
+            return True
+        return False
+
+    def _sentence_table_repair_reasons(self, schema: pa.Schema | None) -> list[str]:
+        if schema is None:
+            return []
+
+        reasons: list[str] = []
+        missing = [name for name in self._SENTENCE_COLUMNS if name not in schema.names]
+        if missing:
+            reasons.append(f"missing columns: {', '.join(missing)}")
+
+        nullish = [
+            name
+            for name in self._SENTENCE_COLUMNS
+            if name in schema.names and self._field_is_nullish(schema.field(name))
+        ]
+        if nullish:
+            reasons.append(f"null-typed columns: {', '.join(nullish)}")
+
+        return reasons
+
+    def _normalize_sentence_row(
+        self, row: dict, document_key: str | None = None
+    ) -> dict:
+        page_section = row.get("page_section")
+        return {
+            "id": str(row.get("id", "")),
+            "vector": [float(x) for x in (row.get("vector") or [])],
+            "document": str(row.get("document") or ""),
+            "document_key": str(document_key or row.get("document_key") or ""),
+            "page": int(row.get("page", 1) or 1),
+            "page_section": int(page_section) if page_section is not None else None,
+            "sentence_index": int(row.get("sentence_index", 0) or 0),
+            "citation_numbers": [int(v) for v in (row.get("citation_numbers") or [])],
+            "referenced_texts": [str(v) for v in (row.get("referenced_texts") or [])],
+            "referenced_bibtex": [str(v) for v in (row.get("referenced_bibtex") or [])],
+        }
+
+    @classmethod
+    def _rows_to_arrow_table(cls, rows: list[dict], dim: int) -> pa.Table:
+        batch = pa.RecordBatch.from_pylist(rows, schema=cls._sentence_schema(dim))
+        return pa.Table.from_batches([batch], schema=cls._sentence_schema(dim))
+
+    def _detect_dimensions(self) -> None:
         if not self.sentences_table:
+            return
+
+        schema_dim = self._vector_dimension_from_schema(self.sentences_table.schema)
+        if schema_dim and schema_dim > 0:
+            self._detected_sentence_dim = schema_dim
+            logger.info(
+                "Detected existing sentence embedding dimension: %s",
+                self._detected_sentence_dim,
+            )
             return
 
         try:
             rows = self.sentences_table.search().select(["vector"]).limit(1).to_list()
             if not rows:
                 return
-
             first = rows[0].get("vector")
             if not first:
                 return
-
             dim = len(first)
             if dim > 0:
                 self._detected_sentence_dim = dim
@@ -139,6 +245,138 @@ class VectorStore:
         if self._detected_sentence_dim is None:
             return False
         return self._detected_sentence_dim != expected_dim
+
+    def _validate_batch_dimensions(self, embeddings: List[List[float]]) -> int:
+        dims = sorted({len(emb or []) for emb in embeddings})
+        if not dims or dims == [0]:
+            raise ValueError("Embedding batch is empty or contains only empty vectors.")
+        if len(dims) != 1:
+            raise ValueError(
+                f"Embedding batch contains inconsistent dimensions: {dims}."
+            )
+
+        dim = dims[0]
+        existing_dim = self.get_detected_dimension()
+        if existing_dim and existing_dim != dim:
+            raise ValueError(
+                "Embedding dimension mismatch: existing store uses "
+                f"{existing_dim} dimensions but this batch has {dim}. "
+                "Clear the vector store or re-embed with a consistent model/dimension setting."
+            )
+        return dim
+
+    def _repair_sentence_table_if_needed(self) -> None:
+        if not self.sentences_table:
+            return
+
+        schema = self.sentences_table.schema
+        reasons = self._sentence_table_repair_reasons(schema)
+        if not reasons:
+            return
+
+        dim = self._vector_dimension_from_schema(schema)
+        if dim is None:
+            try:
+                rows = (
+                    self.sentences_table.search().select(["vector"]).limit(1).to_list()
+                )
+                first = rows[0].get("vector") if rows else None
+                dim = len(first) if first else None
+            except Exception:
+                dim = None
+
+        if dim is None or dim <= 0:
+            logger.warning(
+                "Existing LanceDB schema is incompatible (%s) and could not be repaired automatically.",
+                "; ".join(reasons),
+            )
+            return
+
+        try:
+            count = int(self.sentences_table.count_rows())
+        except Exception:
+            count = 0
+
+        if count <= 0:
+            logger.warning(
+                "Dropping empty LanceDB sentence table with incompatible schema (%s).",
+                "; ".join(reasons),
+            )
+            try:
+                self.db.drop_table(self._TABLE_NAME)
+            except Exception:
+                pass
+            self.sentences_table = None
+            self._detected_sentence_dim = None
+            return
+
+        read_columns = self._existing_columns(list(self._SENTENCE_COLUMNS))
+        try:
+            existing_rows = (
+                self.sentences_table.search()
+                .select(read_columns)
+                .limit(count)
+                .to_list()
+            )
+            repaired_rows: list[dict] = []
+            dropped_rows = 0
+            for row in existing_rows:
+                normalized = self._normalize_sentence_row(row)
+                if not normalized["id"] or len(normalized["vector"]) != dim:
+                    dropped_rows += 1
+                    continue
+                repaired_rows.append(normalized)
+
+            self.db.drop_table(self._TABLE_NAME)
+            if repaired_rows:
+                self.sentences_table = self.db.create_table(
+                    self._TABLE_NAME,
+                    data=self._rows_to_arrow_table(repaired_rows, dim),
+                    mode="overwrite",
+                )
+            else:
+                self.sentences_table = None
+            self._detected_sentence_dim = dim
+            self._index_ready = False
+            logger.warning(
+                "Repaired LanceDB sentence table schema (%s)%s.",
+                "; ".join(reasons),
+                f" Dropped {dropped_rows} malformed rows" if dropped_rows else "",
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to repair LanceDB sentence table schema (%s): %s",
+                "; ".join(reasons),
+                e,
+            )
+            self.sentences_table = self._open_table_if_exists()
+
+    def _ensure_sentence_table_compatible(self, embedding_dim: int) -> None:
+        if not self.sentences_table:
+            return
+
+        self._repair_sentence_table_if_needed()
+        if not self.sentences_table:
+            return
+
+        reasons = self._sentence_table_repair_reasons(self.sentences_table.schema)
+        if reasons:
+            raise ValueError(
+                "Existing vector store schema is incompatible ("
+                + "; ".join(reasons)
+                + "). Clear the vector store directory and re-embed."
+            )
+
+        existing_dim = (
+            self.get_detected_dimension()
+            or self._vector_dimension_from_schema(self.sentences_table.schema)
+        )
+        if existing_dim and existing_dim != embedding_dim:
+            raise ValueError(
+                "Embedding dimension mismatch: existing store uses "
+                f"{existing_dim} dimensions but this batch has {embedding_dim}. "
+                "Clear the vector store or re-embed with a consistent model/dimension setting."
+            )
 
     # --- Document metadata tracking ---
 
@@ -169,7 +407,6 @@ class VectorStore:
             return
 
         meta_path = self.persist_directory / "embedded_docs.json"
-
         with self._embedded_docs_lock:
             tmp_path = meta_path.with_suffix(".json.tmp")
             try:
@@ -225,16 +462,12 @@ class VectorStore:
         document_key: str,
         batch_size: int = 5000,
     ):
-        """Add sentence embeddings to the store.
-
-        Args:
-            sentences: List of Sentence objects to add.
-            embeddings: Corresponding embedding vectors.
-            document_key: The document key these sentences belong to.
-            batch_size: Maximum number of items per add operation.
-        """
+        """Add sentence embeddings to the store."""
         if not sentences or not embeddings:
             return
+
+        embedding_dim = self._validate_batch_dimensions(embeddings)
+        self._ensure_sentence_table_compatible(embedding_dim)
 
         n = min(len(sentences), len(embeddings))
         if n <= 0:
@@ -256,51 +489,44 @@ class VectorStore:
 
             rows: list[dict] = []
             for s, emb in zip(chunk_sentences, chunk_embeddings):
-                row = {
-                    "id": str(s.id),
-                    "vector": [float(x) for x in emb],
-                    "document": str(s.text),
-                    "document_key": str(document_key),
-                    "page": int(s.page),
-                    "page_section": int(s.page_section)
-                    if s.page_section is not None
-                    else None,
-                    "sentence_index": int(s.sentence_index),
-                }
-
-                citation_numbers = _clip_list(
-                    [int(num) for num in (s.citation_numbers or [])]
+                rows.append(
+                    self._normalize_sentence_row(
+                        {
+                            "id": str(s.id),
+                            "vector": [float(x) for x in emb],
+                            "document": str(s.text),
+                            "page": int(s.page),
+                            "page_section": int(s.page_section)
+                            if s.page_section is not None
+                            else None,
+                            "sentence_index": int(s.sentence_index),
+                            "citation_numbers": _clip_list(
+                                [int(num) for num in (s.citation_numbers or [])]
+                            ),
+                            "referenced_texts": _clip_list(
+                                [str(t) for t in (s.referenced_texts or [])], limit=20
+                            ),
+                            "referenced_bibtex": _clip_list(
+                                [str(b) for b in (s.referenced_bibtex or [])], limit=20
+                            ),
+                        },
+                        document_key=document_key,
+                    )
                 )
-                referenced_texts = _clip_list(
-                    [str(t) for t in (s.referenced_texts or [])], limit=20
-                )
-                referenced_bibtex = _clip_list(
-                    [str(b) for b in (s.referenced_bibtex or [])], limit=20
-                )
-
-                # Keep schema stable by always writing list fields, even when empty.
-                row["citation_numbers"] = citation_numbers
-                row["referenced_texts"] = referenced_texts
-                row["referenced_bibtex"] = referenced_bibtex
-
-                rows.append(row)
 
             with self._table_lock:
                 if self.sentences_table is None:
                     self.sentences_table = self.db.create_table(
                         self._TABLE_NAME,
-                        data=rows,
+                        data=self._rows_to_arrow_table(rows, embedding_dim),
                         mode="overwrite",
                     )
-                    self._detected_sentence_dim = (
-                        len(rows[0].get("vector") or []) if rows else None
-                    )
+                    self._detected_sentence_dim = embedding_dim
                 else:
                     ids = [r["id"] for r in rows]
                     try:
                         self.sentences_table.delete(self._where_in("id", ids))
                     except Exception:
-                        # If delete fails, add still proceeds; consumers should dedupe by id if needed.
                         logger.debug("Could not delete existing ids before add")
                     self.sentences_table.add(rows)
 
@@ -361,7 +587,6 @@ class VectorStore:
         return out
 
     def get_sentence_metadatas_by_ids(self, ids: List[str]) -> dict[str, dict]:
-        """Fetch sentence metadatas for a small set of ids."""
         if not ids or not self.sentences_table:
             return {}
 
@@ -405,11 +630,6 @@ class VectorStore:
         document_key: str,
         top_k: int = 10,
     ) -> tuple[List[str], List[List[float]]]:
-        """Backward-compatible search API.
-
-        NOTE: For large-scale search you should prefer :meth:`search_sentence_ids` which
-        avoids returning embeddings to Python.
-        """
         ids, _scores, _metadatas = self.search_sentence_ids(
             query_embedding=query_embedding,
             document_key=document_key,
@@ -424,15 +644,8 @@ class VectorStore:
         top_k: int = 10,
         include_documents: bool = False,
     ) -> tuple[List[str], List[float], List[dict]]:
-        """Search sentence vectors efficiently.
-
-        Returns:
-            (ids, relevance_scores, metadatas)
-        """
         if not self.sentences_table:
             return [], [], []
-
-        # self._ensure_cosine_index()
 
         def _execute_query() -> list[dict]:
             builder: Any = self.sentences_table.search(
@@ -460,11 +673,9 @@ class VectorStore:
                 columns,
             ).to_list()
 
-        rows: list[dict]
         try:
             rows = _execute_query()
         except Exception:
-            # A long-lived table handle can lag behind latest writes; refresh and retry once.
             self._refresh_table_handle()
             if not self.sentences_table:
                 return [], [], []
@@ -476,15 +687,12 @@ class VectorStore:
         ids: list[str] = []
         scores: list[float] = []
         metadatas: list[dict] = []
-
         for row in rows:
             sid = str(row.get("id", ""))
             if not sid:
                 continue
-
             distance = float(row.get("_distance", 1.0))
-            score = 1.0 - (distance / 2)  # Convert cosine distance to similarity score
-
+            score = 1.0 - (distance / 2)
             meta = {
                 "document_key": row.get("document_key"),
                 "page": row.get("page"),
@@ -496,7 +704,6 @@ class VectorStore:
             }
             if include_documents:
                 meta["document"] = str(row.get("document", ""))
-
             ids.append(sid)
             scores.append(score)
             metadatas.append(meta)
@@ -504,7 +711,6 @@ class VectorStore:
         return ids, scores, metadatas
 
     def get_sentence_texts_by_ids(self, ids: List[str]) -> dict[str, str]:
-        """Fetch sentence texts for a small set of ids."""
         if not ids or not self.sentences_table:
             return {}
 
@@ -521,14 +727,12 @@ class VectorStore:
                 continue
             if not row_list:
                 continue
-            row = row_list[0]
-            doc = row.get("document")
+            doc = row_list[0].get("document")
             if doc is not None:
                 out[sid] = str(doc)
         return out
 
     def is_document_embedded(self, document_key: str) -> bool:
-        """Return True if at least one sentence vector exists for this document."""
         if not document_key or not self.sentences_table:
             return False
 
@@ -573,7 +777,6 @@ class VectorStore:
             return 0
 
     def get_document_title(self, document_key: str) -> Optional[str]:
-        # Titles are no longer stored in the vector DB; keep API for MCP compatibility.
         return None
 
     def _available_columns(self) -> set[str]:

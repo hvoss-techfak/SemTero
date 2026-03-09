@@ -7,6 +7,7 @@ It supports both user library and group libraries.
 import logging
 import re
 import unicodedata
+from contextlib import closing
 import requests
 from pathlib import Path
 from typing import Generator
@@ -51,6 +52,16 @@ class ZoteroClient:
 
         # Cache for groups
         self._groups: list[dict] | None = None
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def _get_user_items_url(self) -> str:
         """Get the URL for user items endpoint."""
@@ -500,31 +511,30 @@ class ZoteroClient:
             return None
 
         try:
-            # Follow redirect manually since we need the actual file URL
-            response = self.session.get(url, stream=True, allow_redirects=False)
+            # Follow redirect manually since we need the actual file URL.
+            # The streamed response must be closed explicitly so repeated
+            # background embedding passes don't leak sockets/file descriptors.
+            with closing(
+                self.session.get(url, stream=True, allow_redirects=False)
+            ) as response:
+                if response.status_code == 302:
+                    redirect_url = response.headers.get("Location")
+                    if redirect_url and redirect_url.startswith("file://"):
+                        source_path = redirect_url.replace("file://", "")
+                        data = self._read_local_pdf(source_path)
+                        if not data:
+                            return None
+                        return data
 
-            # Handle redirect (local API returns 302 to local file path)
-            if response.status_code == 302:
-                redirect_url = response.headers.get("Location")
-                if redirect_url and redirect_url.startswith("file://"):
-                    # Local file - read directly
-                    source_path = redirect_url.replace("file://", "")
-                    data = self._read_local_pdf(source_path)
-                    # Guard against empty files
-                    if not data:
-                        return None
-                    return data
+                if response.status_code == 204:
+                    return None
 
-            if response.status_code == 204:  # No content
-                return None
+                response.raise_for_status()
 
-            response.raise_for_status()
-
-            data = response.content
-            # Guard: sometimes Zotero returns 200 with an empty body
-            if not data:
-                return None
-            return data
+                data = response.content
+                if not data:
+                    return None
+                return data
 
         except requests.RequestException:
             return None
@@ -692,32 +702,29 @@ class ZoteroClient:
             return None
 
         try:
-            response = self.session.get(url, stream=True, allow_redirects=False)
+            with closing(
+                self.session.get(url, stream=True, allow_redirects=False)
+            ) as response:
+                if response.status_code == 302:
+                    redirect_url = response.headers.get("Location")
+                    if redirect_url and redirect_url.startswith("file://"):
+                        source_path = redirect_url.replace("file://", "")
+                        data = self._read_local_pdf(source_path)
+                        if not data:
+                            return None
+                        return data
 
-            # Handle redirect (local API returns 302 to local file path)
-            if response.status_code == 302:
-                redirect_url = response.headers.get("Location")
-                if redirect_url and redirect_url.startswith("file://"):
-                    source_path = redirect_url.replace("file://", "")
-                    data = self._read_local_pdf(source_path)
-                    if not data:
-                        return None
-                    return data
+                if response.status_code == 204:
+                    return None
 
-            if response.status_code == 204:  # No content
-                print("No Content")
-                return None
+                response.raise_for_status()
 
-            response.raise_for_status()
+                data = response.content
+                if not data:
+                    return None
+                return data
 
-            data = response.content
-            if not data:
-                print("No Data")
-                return None
-            return data
-
-        except requests.RequestException as e:
-            print(e)
+        except requests.RequestException:
             return None
 
     def download_pdf_for_doc(self, document: Document) -> bool:
@@ -1103,7 +1110,6 @@ class ZoteroClient:
         """Convert a Zotero item to a BibTeX entry."""
         data = item.get("data", {})
         key = item.get("key", "")
-        item_type = data.get("itemType", "misc")
         bibtex_type = self._bibtex_type_for_item(data)
         cite_key = self._build_bibtex_key(item)
         year = self._extract_year(data.get("date"))

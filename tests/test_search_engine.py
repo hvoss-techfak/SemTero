@@ -4,6 +4,8 @@ import sys
 import os
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 # Add src to path like main.py does
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -29,34 +31,60 @@ class TestSearchEngineInitialization:
 class TestQueryEmbedding:
     """Test suite for query embedding generation."""
 
-    @patch("zoterorag.search_engine.ollama.embeddings")
-    def test_get_query_embedding(self, mock_ollama_embeddings):
+    @patch("zoterorag.search_engine.Client")
+    @patch("zoterorag.search_engine.VectorStore")
+    def test_get_query_embedding(self, mock_vector_store, mock_client_cls):
         """Test query embedding generation."""
-        mock_response = {"embedding": [0.1, 0.2, 0.3]}
-        mock_ollama_embeddings.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.embeddings.return_value = {"embedding": [0.1, 0.2, 0.3]}
+        mock_client_cls.return_value = mock_client
 
         config = Config()
+        config.EMBEDDING_DIMENSIONS = 0
         engine = SearchEngine(config)
+        engine.vector_store.get_detected_dimension.return_value = None
 
         result = engine._get_query_embedding("test query")
 
         assert result == [0.1, 0.2, 0.3]
-        mock_ollama_embeddings.assert_called_once()
+        mock_client.embeddings.assert_called_once()
+
+    @patch("zoterorag.search_engine.Client")
+    @patch("zoterorag.search_engine.VectorStore")
+    def test_get_query_embedding_raises_on_dimension_mismatch(
+        self, mock_vector_store, mock_client_cls
+    ):
+        mock_client = MagicMock()
+        mock_client.embeddings.return_value = {"embedding": [0.1] * 2560}
+        mock_client_cls.return_value = mock_client
+
+        config = Config()
+        config.EMBEDDING_DIMENSIONS = 1024
+        engine = SearchEngine(config)
+        engine.vector_store.get_detected_dimension.return_value = None
+
+        with pytest.raises(ValueError, match="EMBEDDING_DIMENSIONS=1024"):
+            engine._get_query_embedding("test query")
 
 
 class TestSearchBestSentences:
     """Search should use ANN ids+distances and only fetch top-k texts."""
 
-    @patch("zoterorag.search_engine.ollama.embeddings")
+    @patch("zoterorag.search_engine.Client")
+    @patch("zoterorag.search_engine.VectorStore")
     def test_search_best_sentences_uses_ids_and_fetches_texts(
-        self, mock_ollama_embeddings
+        self, mock_vector_store_cls, mock_client_cls
     ):
-        mock_ollama_embeddings.return_value = {"embedding": [0.0, 0.0, 1.0]}
+        mock_client = MagicMock()
+        mock_client.embeddings.return_value = {"embedding": [0.0, 0.0, 1.0]}
+        mock_client_cls.return_value = mock_client
 
         config = Config()
+        config.EMBEDDING_DIMENSIONS = 0
         engine = SearchEngine(config)
 
         mock_vs = MagicMock()
+        mock_vs.get_detected_dimension.return_value = None
         mock_vs.search_sentence_ids.return_value = (
             ["s1", "s2"],
             [0.25, 0.5],
@@ -67,19 +95,26 @@ class TestSearchBestSentences:
 
         results = engine.search_best_sentences("q", top_sentences=2)
 
-        assert [r.text for r in results] == ["hello", "world"]
+        assert [r.text for r in results] == ["world", "hello"]
         mock_vs.search_sentence_ids.assert_called_once()
         mock_vs.get_sentence_texts_by_ids.assert_called_once_with(["s1", "s2"])
         assert all(isinstance(r, SearchResult) for r in results)
 
-    @patch("zoterorag.search_engine.ollama.embeddings")
-    def test_search_best_sentences_citation_return_modes(self, mock_ollama_embeddings):
-        mock_ollama_embeddings.return_value = {"embedding": [0.0, 0.0, 1.0]}
+    @patch("zoterorag.search_engine.Client")
+    @patch("zoterorag.search_engine.VectorStore")
+    def test_search_best_sentences_citation_return_modes(
+        self, mock_vector_store_cls, mock_client_cls
+    ):
+        mock_client = MagicMock()
+        mock_client.embeddings.return_value = {"embedding": [0.0, 0.0, 1.0]}
+        mock_client_cls.return_value = mock_client
 
         config = Config()
+        config.EMBEDDING_DIMENSIONS = 0
         engine = SearchEngine(config)
 
         mock_vs = MagicMock()
+        mock_vs.get_detected_dimension.return_value = None
         mock_vs.search_sentence_ids.return_value = (
             ["s1"],
             [0.25],

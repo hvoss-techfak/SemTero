@@ -13,6 +13,22 @@ from zoterorag.zotero_client import ZoteroClient
 from zoterorag.models import Document
 
 
+class _ClosableResponse:
+    def __init__(self, *, status_code=200, headers=None, content=b"", raise_error=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.content = content
+        self._raise_error = raise_error
+        self.closed = False
+
+    def raise_for_status(self):
+        if self._raise_error is not None:
+            raise self._raise_error
+
+    def close(self):
+        self.closed = True
+
+
 class TestZoteroClientInitialization:
     """Test suite for ZoteroClient initialization."""
 
@@ -83,6 +99,14 @@ class TestConnectionCheck:
         result = client.check_connection()
 
         assert result is False
+
+    def test_close_closes_underlying_session(self):
+        client = ZoteroClient()
+        client.session.close = Mock()
+
+        client.close()
+
+        client.session.close.assert_called_once()
 
 
 class TestGetGroups:
@@ -427,6 +451,33 @@ class TestDownloadPdf:
         result = client.download_pdf("ABC123", Path("/tmp/test.pdf"))
 
         assert result is False
+
+    def test_get_pdf_bytes_closes_streamed_response_after_success(self):
+        client = ZoteroClient()
+        response = _ClosableResponse(content=b"%PDF-1.4 test")
+        client.get_file_url = Mock(return_value="http://example.test/file")
+        client.session.get = Mock(return_value=response)
+
+        result = client.get_pdf_bytes("ABC123")
+
+        assert result == b"%PDF-1.4 test"
+        assert response.closed is True
+
+    def test_get_group_pdf_bytes_closes_streamed_response_after_redirect(self):
+        client = ZoteroClient()
+        response = _ClosableResponse(
+            status_code=302,
+            headers={"Location": "file:///tmp/group.pdf"},
+        )
+        client.get_group_file_url = Mock(return_value="http://example.test/group-file")
+        client.session.get = Mock(return_value=response)
+        client._read_local_pdf = Mock(return_value=b"%PDF-1.4 group")
+
+        result = client.get_group_pdf_bytes(123, "ABC123")
+
+        assert result == b"%PDF-1.4 group"
+        assert response.closed is True
+        client._read_local_pdf.assert_called_once_with("/tmp/group.pdf")
 
 
 class TestParseItemToDocument:

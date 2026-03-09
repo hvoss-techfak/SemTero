@@ -552,7 +552,25 @@ class MCPZoteroServer:
 
     def shutdown(self):
         """Shutdown the server."""
+        embedding_thread = self._embedding_thread
+        if (
+            embedding_thread
+            and embedding_thread.is_alive()
+            and threading.current_thread() is not embedding_thread
+        ):
+            embedding_thread.join(timeout=5)
+
         self.embedding_manager.shutdown()
+
+        try:
+            self.zotero_client.close()
+        except Exception:
+            logger.debug("Failed to close Zotero client session", exc_info=True)
+
+        try:
+            self.doi_client.close()
+        except Exception:
+            logger.debug("Failed to close DOI client session", exc_info=True)
 
 
 # --- FastMCP wiring ---
