@@ -1,6 +1,7 @@
 import sys
 import os
 import asyncio
+import threading
 
 import pytest
 
@@ -9,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from zoterorag.config import Config
 from zoterorag.mcp_server import MCPZoteroServer
-from zoterorag.models import SearchResult, EmbeddingStatus
+from zoterorag.models import SearchResult, EmbeddingStatus, Document
 
 
 def test_mcp_search_documents_passes_citation_return_mode_and_filters_require_cited_bibtex(
@@ -286,3 +287,104 @@ def test_mcp_search_documents_emits_progress_updates(monkeypatch):
     assert any(update.get("message") == "Gathering Metadata 1 of 1" for update in updates)
     assert updates[-1]["stage"] == "complete"
     assert updates[-1]["result_count"] == 1
+
+
+def test_get_pending_documents_skips_store_lookup_for_docs_already_in_metadata(
+    monkeypatch,
+):
+    config = Config()
+    server = MCPZoteroServer(config)
+
+    docs = [
+        Document(zotero_key="embedded", title="Already Embedded"),
+        Document(zotero_key="missing", title="Needs Embedding"),
+    ]
+
+    monkeypatch.setattr(server.zotero_client, "get_documents_with_pdfs", lambda: iter(docs))
+    monkeypatch.setattr(
+        server.embedding_manager.vector_store,
+        "get_embedded_documents",
+        lambda: {"embedded": 12},
+    )
+
+    checked = []
+
+    def fake_is_document_embedded(key):
+        checked.append(key)
+        return False
+
+    monkeypatch.setattr(
+        server.embedding_manager.vector_store,
+        "is_document_embedded",
+        fake_is_document_embedded,
+    )
+
+    pending, total_available = server._get_pending_documents()
+
+    assert total_available == 2
+    assert [doc.zotero_key for doc in pending] == ["missing"]
+    assert checked == ["missing"]
+
+
+def test_start_background_embedding_begins_work_before_full_scan_finishes(monkeypatch):
+    config = Config()
+    server = MCPZoteroServer(config)
+
+    first_doc_seen = threading.Event()
+    allow_scan_to_finish = threading.Event()
+    submitted = []
+
+    docs = [
+        Document(zotero_key="doc-1", title="Doc 1"),
+        Document(zotero_key="doc-2", title="Doc 2"),
+    ]
+
+    def slow_docs():
+        yield docs[0]
+        first_doc_seen.set()
+        assert allow_scan_to_finish.wait(timeout=2)
+        yield docs[1]
+
+    class FakeFuture:
+        def result(self):
+            return None
+
+    monkeypatch.setattr(server.zotero_client, "get_documents_with_pdfs", slow_docs)
+    monkeypatch.setattr(
+        server.embedding_manager.vector_store,
+        "get_embedded_documents",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        server.embedding_manager.vector_store,
+        "is_document_embedded",
+        lambda key: False,
+    )
+
+    def fake_embed_document_async_with_client(doc, zotero_client, callback=None):
+        submitted.append(doc.zotero_key)
+        return FakeFuture()
+
+    monkeypatch.setattr(
+        server.embedding_manager,
+        "embed_document_async_with_client",
+        fake_embed_document_async_with_client,
+    )
+
+    result = server.start_background_embedding(trigger="startup")
+    assert result["status"] == "started"
+    assert first_doc_seen.wait(timeout=1)
+
+    status_during_scan = server.embedding_manager.get_embedding_status()
+    assert status_during_scan.is_running is True
+    assert status_during_scan.total_documents >= 1
+    assert submitted == ["doc-1"]
+
+    allow_scan_to_finish.set()
+    assert server._embedding_thread is not None
+    server._embedding_thread.join(timeout=2)
+
+    final_status = server.embedding_manager.get_embedding_status()
+    assert final_status.is_running is False
+    assert final_status.total_documents == 2
+    assert submitted == ["doc-1", "doc-2"]

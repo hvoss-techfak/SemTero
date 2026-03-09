@@ -66,49 +66,72 @@ class MCPZoteroServer:
             except Exception:
                 logger.debug("Embedding status listener failed", exc_info=True)
 
-    def _get_pending_documents(self) -> tuple[list, int]:
-        all_docs_with_pdfs = list(self.zotero_client.get_documents_with_pdfs())
-        if not all_docs_with_pdfs:
-            return [], 0
+    def _is_document_pending(self, doc, embedded: dict[str, int]) -> bool:
+        sentence_count = int(embedded.get(doc.zotero_key, 0) or 0)
+        if sentence_count > 0:
+            return False
 
+        try:
+            return not self.embedding_manager.vector_store.is_document_embedded(
+                doc.zotero_key
+            )
+        except Exception:
+            logger.debug(
+                "Falling back to metadata-only embedded check for %s",
+                doc.zotero_key,
+                exc_info=True,
+            )
+            return True
+
+    def _get_pending_documents(self) -> tuple[list, int]:
         embedded = self.embedding_manager.vector_store.get_embedded_documents()
         pending = []
-        for doc in all_docs_with_pdfs:
-            try:
-                if self.embedding_manager.vector_store.is_document_embedded(
-                    doc.zotero_key
-                ):
-                    continue
-            except Exception:
-                pass
-
-            if doc.zotero_key not in embedded or embedded.get(doc.zotero_key, 0) == 0:
+        total_available = 0
+        for doc in self.zotero_client.get_documents_with_pdfs():
+            total_available += 1
+            if self._is_document_pending(doc, embedded):
                 pending.append(doc)
 
-        return pending, len(all_docs_with_pdfs)
+        return pending, total_available
+
+    def _finish_embedding_job(self, *, last_error: str = ""):
+        finish_job = getattr(self.embedding_manager, "finish_embedding_job", None)
+        if finish_job is None:
+            raise AttributeError("EmbeddingManager is missing finish_embedding_job")
+        if last_error:
+            return finish_job(last_error=last_error)
+        return finish_job()
 
     def _run_background_embedding(self, trigger: str) -> None:
         try:
-            pending, total_available = self._get_pending_documents()
-            if total_available == 0:
-                self._last_run_summary = "No Zotero documents with PDFs were found."
-                self._notify_embedding_status()
-                return
-
-            if not pending:
-                self._last_run_summary = "All documents are already embedded."
-                self._notify_embedding_status()
-                return
-
-            self.embedding_manager.start_embedding_job(len(pending))
+            scan_status = self.embedding_manager.mark_embedding_scan_started()
             self._next_auto_reembed_at = ""
             self._last_run_summary = (
-                f"Embedding {len(pending)} new document(s) triggered by {trigger}."
+                f"Scanning Zotero for documents to embed (trigger: {trigger})."
             )
-            self._notify_embedding_status()
+            self._notify_embedding_status(scan_status)
 
+            embedded = self.embedding_manager.vector_store.get_embedded_documents()
             futures = []
-            for doc in pending:
+            total_available = 0
+            pending_count = 0
+
+            for doc in self.zotero_client.get_documents_with_pdfs():
+                total_available += 1
+                if not self._is_document_pending(doc, embedded):
+                    continue
+
+                pending_count += 1
+                scan_status = self.embedding_manager.set_embedding_job_total(
+                    pending_count
+                )
+                if pending_count == 1 or pending_count % 25 == 0:
+                    self._last_run_summary = (
+                        "Embedding started while Zotero is still being scanned. "
+                        f"Discovered {pending_count} pending document(s) so far."
+                    )
+                    self._notify_embedding_status(scan_status)
+
                 try:
                     futures.append(
                         self.embedding_manager.embed_document_async_with_client(
@@ -127,13 +150,32 @@ class MCPZoteroServer:
                     )
                     self._notify_embedding_status(snapshot)
 
+            if total_available == 0:
+                self._last_run_summary = "No Zotero documents with PDFs were found."
+                final_status = self._finish_embedding_job()
+                self._notify_embedding_status(final_status)
+                return
+
+            if not pending_count:
+                self._last_run_summary = "All documents are already embedded."
+                final_status = self._finish_embedding_job()
+                self._notify_embedding_status(final_status)
+                return
+
+            self._last_run_summary = (
+                f"Embedding {pending_count} new document(s) triggered by {trigger}."
+            )
+            self._notify_embedding_status(
+                self.embedding_manager.set_embedding_job_total(pending_count)
+            )
+
             for future in futures:
                 try:
                     future.result()
                 except Exception as e:
                     logger.warning("Background embedding future failed: %s", e)
 
-            final_status = self.embedding_manager.finish_embedding_job()
+            final_status = self._finish_embedding_job()
             if final_status.failed_documents:
                 self._last_run_summary = f"Embedding finished with {final_status.failed_documents} failed document(s)."
             else:
@@ -141,9 +183,7 @@ class MCPZoteroServer:
             self._notify_embedding_status(final_status)
         except Exception as e:
             logger.exception("Background embedding run failed")
-            final_status = self.embedding_manager.finish_embedding_job(
-                last_error=str(e)
-            )
+            final_status = self._finish_embedding_job(last_error=str(e))
             self._last_run_summary = f"Embedding failed: {e}"
             self._notify_embedding_status(final_status)
         finally:

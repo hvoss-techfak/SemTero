@@ -111,21 +111,49 @@ class EmbeddingManager:
                 self._embedding_progress.last_error = last_error
             return self._status_copy_locked()
 
-    def start_embedding_job(self, total_documents: int):
+    def mark_embedding_scan_started(self) -> EmbeddingStatus:
+        """Mark a background embedding scan as running before pending docs are fully known."""
+
         with self._progress_lock:
             self._embedding_progress = EmbeddingStatus(
-                total_documents=total_documents,
+                total_documents=0,
                 processed_documents=0,
+                embedded_sections=0,
+                embedded_sentences=0,
+                pending_sections=0,
                 is_running=True,
+                failed_documents=0,
                 started_at=self._utc_now_iso(),
                 finished_at="",
                 last_error="",
-                failed_documents=0,
             )
+            return self._status_copy_locked()
+
+    def set_embedding_job_total(self, total_documents: int) -> EmbeddingStatus:
+        """Increase the discovered document total for the active embedding job."""
+
+        with self._progress_lock:
+            next_total = max(
+                int(total_documents),
+                self._embedding_progress.processed_documents,
+                self._embedding_progress.total_documents,
+            )
+            self._embedding_progress.total_documents = max(0, next_total)
+            self._embedding_progress.is_running = True
+            if not self._embedding_progress.started_at:
+                self._embedding_progress.started_at = self._utc_now_iso()
+            self._embedding_progress.finished_at = ""
+            return self._status_copy_locked()
+
+    def start_embedding_job(self, total_documents: int):
+        snapshot = self.mark_embedding_scan_started()
+        if total_documents > 0:
+            snapshot = self.set_embedding_job_total(total_documents)
         logger.info(
             "[EmbeddingManager] Started embedding job for %s documents",
             total_documents,
         )
+        return snapshot
 
     def finish_embedding_job(self, *, last_error: str = "") -> EmbeddingStatus:
         with self._progress_lock:
