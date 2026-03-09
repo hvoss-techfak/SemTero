@@ -2,6 +2,8 @@ import sys
 import os
 import asyncio
 
+import pytest
+
 # Add src to path like main.py does
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -177,3 +179,72 @@ def test_server_shares_vector_store_between_embedding_and_search():
     server = MCPZoteroServer(config)
 
     assert server.embedding_manager.vector_store is server.search_engine.vector_store
+
+
+def test_do_reranking_passes_vram_threshold_and_releases_device(monkeypatch):
+    config = Config()
+    config.RERANKER_GPU_MIN_VRAM_GB = 12.0
+    server = MCPZoteroServer(config)
+
+    calls = []
+
+    class FakeReranker:
+        def __init__(self, min_gpu_vram_gb=8.0):
+            calls.append(("init", min_gpu_vram_gb))
+
+        def rerank(self, results, query):
+            calls.append(("rerank", query, len(results)))
+            return list(reversed(results))
+
+        def release_device(self):
+            calls.append(("release",))
+
+    monkeypatch.setattr("zoterorag.mcp_server.Reranker", FakeReranker)
+
+    results = [
+        SearchResult(
+            text="first",
+            document_title="",
+            section_title="",
+            zotero_key="doc1",
+            relevance_score=0.9,
+        ),
+        SearchResult(
+            text="second",
+            document_title="",
+            section_title="",
+            zotero_key="doc2",
+            relevance_score=0.8,
+        ),
+    ]
+
+    reranked = server.do_reranking(results, "query")
+
+    assert [item[0] for item in calls] == ["init", "rerank", "release"]
+    assert calls[0] == ("init", 12.0)
+    assert reranked[0].text == "second"
+
+
+def test_do_reranking_releases_device_when_rerank_fails(monkeypatch):
+    config = Config()
+    server = MCPZoteroServer(config)
+
+    calls = []
+
+    class FakeReranker:
+        def __init__(self, min_gpu_vram_gb=8.0):
+            calls.append(("init", min_gpu_vram_gb))
+
+        def rerank(self, results, query):
+            calls.append(("rerank", query))
+            raise RuntimeError("boom")
+
+        def release_device(self):
+            calls.append(("release",))
+
+    monkeypatch.setattr("zoterorag.mcp_server.Reranker", FakeReranker)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        server.do_reranking([], "query")
+
+    assert [item[0] for item in calls] == ["init", "rerank", "release"]

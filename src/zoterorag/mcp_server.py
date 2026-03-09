@@ -227,9 +227,14 @@ class MCPZoteroServer:
     ) -> list[SearchResult]:
         """Optional second-stage reranking of search results."""
 
-        rer = Reranker()
-        results = rer.rerank(results, query)
-        return results
+        rer = Reranker(
+            model_name=self.config.RERANKER_MODEL,
+            min_gpu_vram_gb=self.config.RERANKER_GPU_MIN_VRAM_GB,
+        )
+        try:
+            return rer.rerank(results, query)
+        finally:
+            rer.release_device()
 
     async def search_documents(
         self,

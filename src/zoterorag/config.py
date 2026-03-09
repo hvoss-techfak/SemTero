@@ -87,7 +87,10 @@ class Config:
         )
         self.EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
         self.RERANKER_MODEL: str = os.getenv(
-            "RERANKER_MODEL", "dengcao/Qwen3-Reranker-0.6B:Q8_0"
+            "RERANKER_MODEL", "Qwen/Qwen3-Reranker-0.6B"
+        )
+        self.RERANKER_GPU_MIN_VRAM_GB: float = max(
+            0.0, _get_float("RERANKER_GPU_MIN_VRAM_GB", 8.0)
         )
 
         # Embedding dimensions: 0 means auto-detect from model

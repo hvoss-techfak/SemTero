@@ -22,6 +22,7 @@ class TestConfigFromEnvironment:
             "OLLAMA_BASE_URL": "http://custom:11434",
             "EMBEDDING_MODEL": "custom-model:latest",
             "RERANKER_MODEL": "custom-reranker:latest",
+            "RERANKER_GPU_MIN_VRAM_GB": "12.5",
             "EMBEDDING_DIMENSIONS": "1024",
             "DEFAULT_TOP_X": "20",
             "VECTOR_STORE_DIR": "/custom/vector_store",
@@ -41,6 +42,7 @@ class TestConfigFromEnvironment:
         assert config.ZOTERO_LIBRARY_ID == "12345"
         assert config.OLLAMA_BASE_URL == "http://custom:11434"
         assert config.EMBEDDING_MODEL == "custom-model:latest"
+        assert config.RERANKER_GPU_MIN_VRAM_GB == 12.5
         assert config.EMBEDDING_DIMENSIONS == 1024
         assert config.DEFAULT_TOP_X == 20
         assert config.VECTOR_STORE_DIR == Path("/custom/vector_store")
@@ -117,6 +119,12 @@ class TestConfigEdgeCases:
         config = Config()
         # Should handle gracefully (use 1 as fallback)
         assert isinstance(config.MAX_EMBEDDING_WORKERS, int)
+
+    @patch.dict(os.environ, {"RERANKER_GPU_MIN_VRAM_GB": "nope"})
+    def test_invalid_reranker_vram_threshold_falls_back_to_default(self):
+        """Test that invalid reranker VRAM thresholds use the safe default."""
+        config = Config()
+        assert config.RERANKER_GPU_MIN_VRAM_GB == 8.0
 
     def test_library_id_can_be_none(self):
         """Test that library ID can be None."""

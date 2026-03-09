@@ -48,13 +48,17 @@ Key settings:
 - `AUTO_REEMBED_INTERVAL_MINUTES` — how long to wait after a background embedding pass finishes before the next auto re-scan
 - `EMBED_PROGRESS_INTERVAL_SEC` — CLI progress refresh rate
 - `APP_HOST` / `WEBUI_HOST` — bind hosts for server and UI
+- `RERANKER_GPU_MIN_VRAM_GB` — minimum total and currently free VRAM required before the reranker will move to CUDA; defaults to `8.0`
 
 Production defaults are intentionally quiet:
 
 ```dotenv
 LOG_LEVEL=WARNING
 NOISY_LOG_LEVEL=WARNING
+RERANKER_GPU_MIN_VRAM_GB=8.0
 ```
+
+The reranker now loads onto CUDA only when a compatible GPU has enough VRAM available, and it releases the model plus cached CUDA memory immediately after reranking finishes.
 
 ## Local setup
 
